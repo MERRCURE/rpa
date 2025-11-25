@@ -13,7 +13,7 @@ def _merge_texts(pdf_paths: List[str]) -> str:
             parts.append(ocr_text_from_pdf(p))
         except Exception as e:
             print(
-                f"WARNUNG: OCR-Fehler beim Lesen von Sprachzertifikat {p}: {e}")
+                f"error language certicate couldnt be read{p}: {e}")
     return "\n".join(parts)
 
 

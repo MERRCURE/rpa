@@ -14,7 +14,7 @@ from phases.filterphase_evaluierung import run_filterphase_evaluierung
 
 
 # 1 URL
-FLOW_URL = "https://test02.digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
+FLOW_URL = "https://digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
 
 
 def create_chrome_options(download_dir):
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     bot = BrowserAutomation(options=chrome_options)
 
     # 1 url
-    login_url = "https://test02.digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
+    login_url = "https://digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
     print("STATUS open ")
     bot.open_url(login_url)
     print("STATUS: ready")
@@ -132,7 +132,7 @@ if __name__ == "__main__":
 
     print("Popup (7 Sekunden")
     # 2 entfernen
-    time.sleep(7)
+    time.sleep(2)
 
     open_flow(bot)
     run_filterphase_evaluierung(bot, FLOW_URL, config_module)

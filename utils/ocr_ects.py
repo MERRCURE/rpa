@@ -19,7 +19,6 @@ from utils.ocr_engine import extract_ects_ocr
 
 NOTE_STRICT_RE = re.compile(r"\b([0-6][.,]\d{1,2})\b")
 
-
 _FILE_HASH_CACHE = {}
 _OCR_TEXT_CACHE = {}
 
@@ -28,7 +27,6 @@ _MAX_THREADS = max(1, int(_NUM_CPUS * 0.9))
 
 
 def _compute_file_hash(pdf_path: str) -> str:
-
     h_cached = _FILE_HASH_CACHE.get(pdf_path)
     if h_cached:
         return h_cached
@@ -45,63 +43,139 @@ def _compute_file_hash(pdf_path: str) -> str:
     return digest
 
 
+def detect_tesseract():
+
+    if pytesseract is None:
+        return
+
+    env_cmd = os.environ.get("TESSERACT_CMD")
+    if env_cmd and os.path.isfile(env_cmd):
+        pytesseract.pytesseract.tesseract_cmd = env_cmd
+        print(f"error: Tesseract via environment: {env_cmd}")
+        return
+
+    system = platform.system()
+
+    if system == "Windows":
+        candidates = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                pytesseract.pytesseract.tesseract_cmd = c
+                print(f"INFO: Tesseract auto-detected: {c}")
+                return
+        print("error: Tesseract not found  (Windows).")
+
+    elif system == "Darwin":
+        candidates = [
+            "/usr/local/bin/tesseract",
+            "/opt/homebrew/bin/tesseract",
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                pytesseract.pytesseract.tesseract_cmd = c
+                print(f"INFO: Tesseract auto-detected: {c}")
+                return
+        print("error: Tesseract not found  (macOS).")
+
+    else:
+
+        pytesseract.pytesseract.tesseract_cmd = "tesseract"
+
+
 def get_poppler_path():
+    """
+    Cross-platform Poppler detection.
+    Priority:
+    1. Environment variable POPPLER_PATH
+    2. Windows winget/installer locations
+    3. macOS Homebrew
+    4. Linux: None (use system PATH)
+    """
+    env_path = os.environ.get("POPPLER_PATH")
+    if env_path and os.path.isdir(env_path):
+        print(f"INFO: Poppler path from environment: {env_path}")
+        return env_path
 
-    FALLBACK_PATHS = [
-        r"C:\Users\spenl\AppData\Local\Microsoft\WinGet\Packages\oschwartz10612.Poppler_Microsoft.Winget.Source_8wekyb3d8bbwe\poppler-25.07.0\Library\bin"
-    ]
+    system = platform.system()
 
-    for path in FALLBACK_PATHS:
-        if os.path.isdir(path):
-            print(f"INFO: Poppler-Pfad über Hardcode-Fallback erkannt: {path}")
-            return path
+    if system == "Windows":
+        possible_win_paths = [
+            r"C:\Program Files\poppler\bin",
+            r"C:\Program Files (x86)\poppler\bin",
+        ]
 
-    if platform.system() == "Windows":
-        poppler_dirs = glob.glob(r"C:\Program Files\poppler-*")
-        if poppler_dirs:
-            latest_poppler_dir = max(poppler_dirs, key=os.path.getctime)
-            poppler_bin_path = os.path.join(latest_poppler_dir, "bin")
-            if os.path.isdir(poppler_bin_path):
-                print(
-                    f"INFO: Poppler-Pfad automatisch erkannt: {poppler_bin_path}"
-                )
-                return poppler_bin_path
-        print("WARNUNG: Poppler path not found")
+        winget_dirs = glob.glob(
+            r"C:\Users\*\AppData\Local\Microsoft\WinGet\Packages\*\poppler*\Library\bin"
+        )
+        possible_win_paths.extend(winget_dirs)
+
+        program_files_dirs = glob.glob(r"C:\Program Files\poppler-*")
+        for d in program_files_dirs:
+            possible_win_paths.append(os.path.join(d, "bin"))
+
+        for p in possible_win_paths:
+            if os.path.isdir(p):
+                print(f"INFO: Poppler found: {p}")
+                return p
+
+        print("WARNUNG: Poppler not found on Windows")
+        return None
+
+    if system == "Darwin":
+        brew_paths = [
+            "/usr/local/opt/poppler/bin",
+            "/opt/homebrew/opt/poppler/bin",
+        ]
+        for p in brew_paths:
+            if os.path.isdir(p):
+                print(f"INFO: Poppler found: {p}")
+                return p
+        return None
+
+    if system == "Linux":
+
         return None
 
     return None
 
 
+if pytesseract is not None:
+    detect_tesseract()
 POPPLER_PATH = get_poppler_path()
 
 
 def ensure_ocr_available():
     if convert_from_path is None or pytesseract is None:
         raise RuntimeError(
-            "OCR nicht verfuegbar (pdf2image/pytesseract fehlen).")
+            "OCR not avialble   (pdf2image/pytesseract )."
+        )
     return True
 
 
 def _ocr_text_from_pdf_cached(pdf_path: str, dpi: int = 200, psm: int = 6) -> str:
-
     if convert_from_path is None or pytesseract is None:
-        raise RuntimeError("OCR not found")
+        raise RuntimeError("OCR not available (pdf2image/pytesseract ).")
 
     file_hash = _compute_file_hash(pdf_path)
     cache_key = (file_hash, dpi, psm)
     if cache_key in _OCR_TEXT_CACHE:
         return _OCR_TEXT_CACHE[cache_key]
 
-    print(f"start OCR for {pdf_path} (dpi={dpi}, psm={psm})")
+    print(f"Start OCR for {pdf_path} (dpi={dpi}, psm={psm})")
     images = convert_from_path(pdf_path, dpi=dpi, poppler_path=POPPLER_PATH)
 
     config = f"--psm {psm}"
 
     def _ocr_page(img):
         try:
-            return pytesseract.image_to_string(img, lang="deu+eng", config=config)
+            return pytesseract.image_to_string(
+                img, lang="deu+eng", config=config
+            )
         except Exception as e:
-            print(f"OCR-Fehler bei {pdf_path}: {e}")
+            print(f"OCR-error  {pdf_path}: {e}")
             return ""
 
     with ThreadPool(min(len(images), _MAX_THREADS)) as pool:
@@ -113,14 +187,12 @@ def _ocr_text_from_pdf_cached(pdf_path: str, dpi: int = 200, psm: int = 6) -> st
 
 
 def ocr_text_from_pdf(pdf_path, dpi=200):
-
     return _ocr_text_from_pdf_cached(pdf_path, dpi=dpi, psm=6)
 
 
 def extract_ocr_note(text: str):
-
     if not text:
-        print("error: extract_ocr_note() not found")
+        print("error: extract_ocr_note()")
         return None
 
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -151,19 +223,16 @@ def extract_ocr_note(text: str):
         if m:
             try:
                 val = float(m.group(1).replace(",", "."))
-                print(
-                    f"debug OCR-Note found in  '{ln[:80]}...' -> {val}"
-                )
+                print(f"DEBUG: OCR-Note found in '{ln[:80]}...' -> {val}")
                 return val
             except ValueError:
                 continue
 
-    print("erro :no grade with keys found")
+    print("error no keywords found")
     return None
 
 
 def _infer_program_from_categories(categories):
-
     for c in categories:
         if str(c).strip().lower() == "mathematik":
             return "ai"
@@ -171,20 +240,15 @@ def _infer_program_from_categories(categories):
 
 
 def extract_ects_hybrid(pdf_path, module_map, categories):
-
     if not os.path.exists(pdf_path):
-        print(f"error: extract_ects_hybrid() not found: {pdf_path}")
+        print(f"error: extract not found: {pdf_path}")
         return {cat: 0.0 for cat in categories}, [], [], "ocr_hocr"
 
-    print(
-        f" Start OCR-ECTSfor {os.path.basename(pdf_path)}"
-    )
+    print(f"starte {os.path.basename(pdf_path)}")
 
     sums, matched_modules, unrecognized, method = extract_ects_ocr(
         pdf_path, module_map, categories
     )
 
-    print(
-        f"method={method}, sum ects={sum(sums.values())}"
-    )
+    print(f"ocr finished with {method}, sum {sum(sums.values())}")
     return sums, matched_modules, unrecognized, method

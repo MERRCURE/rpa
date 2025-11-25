@@ -6,9 +6,6 @@ except Exception:
     pdfplumber = None
 
 
-# -----------------------------
-# helpers
-# -----------------------------
 def _norm_space(text: str) -> str:
     return " ".join(str(text).split())
 
@@ -156,7 +153,7 @@ def sum_ects_by_category(modules, module_map, categories):
         return _norm_name(s)
 
     def strip_roman(s: str) -> str:
-        # entferne römische Zahlen als eigenes Token
+
         return re.sub(r"\b[ivx]+\b", "", s).strip()
 
     sums = {cat: 0.0 for cat in categories}

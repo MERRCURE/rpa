@@ -8,6 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+
 def wait_for_any_file(download_dir, pattern="*.zip", timeout=40, prev=None):
     prev_set = set(prev or glob.glob(os.path.join(download_dir, pattern)))
     deadline = time.time() + timeout
@@ -93,10 +94,12 @@ def download_pdfs_for_applicant(browser, download_dir, extract_dir, applicant_nu
         print(f"error : no zip for {applicant_num} ")
         return []
 
-    extract_target = os.path.join(extract_dir, f"{applicant_num}_{int(time.time())}")
+    extract_target = os.path.join(
+        extract_dir, f"{applicant_num}_{int(time.time())}")
     print(f"error unpacking zip {extract_target}")
     extract_zip_to_dir(zip_path, extract_target)
 
     pdfs = find_pdfs_in_dir(extract_target)
-    print(f"DEBUG: {len(pdfs)} PDFs found: {[os.path.basename(p) for p in pdfs]}")
+    print(
+        f"DEBUG: {len(pdfs)} PDFs found: {[os.path.basename(p) for p in pdfs]}")
     return pdfs

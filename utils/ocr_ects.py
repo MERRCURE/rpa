@@ -6,6 +6,7 @@ import time
 import hashlib
 import multiprocessing
 from multiprocessing.pool import ThreadPool
+from func_timeout import func_timeout, FunctionTimedOut
 
 try:
     from pdf2image import convert_from_path
@@ -202,6 +203,7 @@ def extract_ocr_note(text: str):
         "abschlussnote",
         "abschlusspruefung",
         "abschlussprüfung",
+        "average mark",
         "overall grade",
         "overall result",
         "overall mark",
@@ -244,11 +246,24 @@ def extract_ects_hybrid(pdf_path, module_map, categories):
         print(f"error: extract not found: {pdf_path}")
         return {cat: 0.0 for cat in categories}, [], [], "ocr_hocr"
 
-    print(f"starte {os.path.basename(pdf_path)}")
-
-    sums, matched_modules, unrecognized, method = extract_ects_ocr(
-        pdf_path, module_map, categories
-    )
+    print(f"starte OCR {os.path.basename(pdf_path)}")
+    try:
+        # Run extract_ects_ocr with a 5-second hard limit
+        sums, matched_modules, unrecognized, method = func_timeout(
+            5,
+            extract_ects_ocr,
+            args=(pdf_path, module_map, categories)
+        )
+    except FunctionTimedOut:
+        print(
+            f"OCR abgebrochen (Timeout > 5s) für {os.path.basename(pdf_path)}")
+        # Set default empty values so your code doesn't crash later
+        sums, matched_modules, unrecognized, method = (
+            {}, [], [], "FAILED_TIMEOUT")
+    except Exception as e:
+        print(f"OCR Error: {e}")
+        sums, matched_modules, unrecognized, method = (
+            {}, [], [], "FAILED_ERROR")
 
     print(f"ocr finished with {method}, sum {sum(sums.values())}")
     return sums, matched_modules, unrecognized, method

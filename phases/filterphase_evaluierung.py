@@ -2,6 +2,7 @@ import os
 import re
 import time
 import csv
+import tqdm
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -229,6 +230,77 @@ def run_filterphase_evaluierung(bot, flow_url, config):
         writer.writerow(header)
 
     try:
+        # --- STEP 0: Safety Check ---
+        # Wait until there are at least 3 "Operator" rows on the screen.
+        # This prevents the script from running before the "Add" button click has finished.
+        WebDriverWait(bot.browser, 10).until(
+            lambda driver: len(driver.find_elements(
+                By.CLASS_NAME, "dropdownEqualOperator")) >= 4
+        )
+
+        # Define the operator you want: "=" or "≠"
+        target_operator = "≠"
+
+        # --- STEP 1: Click the 3rd Operator Dropdown ---
+        # Strategy: Find the 3rd container div, then find the dropdown inside it.
+        operator_trigger = WebDriverWait(bot.browser, 10).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "(//div[contains(@class, 'dropdownEqualOperator')])[4]//div[contains(@class, 'ui-selectonemenu')]"
+                )
+            )
+        )
+        bot.browser.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", operator_trigger)
+        operator_trigger.click()
+
+        # Click the operator option
+        operator_option = WebDriverWait(bot.browser, 10).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    f"//li[contains(@class, 'ui-selectonemenu-item')][normalize-space()='{target_operator}']"
+                )
+            )
+        )
+        operator_option.click()
+
+        # --- STEP 2: Click the 3rd Status Dropdown ---
+        target_status_text = "In Vorbereitung"
+
+        # Strategy: Find the 3rd Operator container again, and look for the
+        # dropdown that is its IMMEDIATE NEIGHBOR (following-sibling).
+        status_trigger = WebDriverWait(bot.browser, 10).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "(//div[contains(@class, 'dropdownEqualOperator')])[4]/following-sibling::div[contains(@class, 'ui-selectonemenu')]"
+                )
+            )
+        )
+        status_trigger.click()
+
+        # Click the status option
+        status_option = WebDriverWait(bot.browser, 10).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    f"//li[contains(@class, 'ui-selectonemenu-item')][normalize-space()='{target_status_text}']"
+                )
+            )
+        )
+        status_option.click()
+
+    except Exception as e:
+        print(f"Error in dropdown selection: {e}")
+        # Optional: Print how many rows were actually found for debugging
+        rows_found = len(bot.browser.find_elements(
+            By.CLASS_NAME, "dropdownEqualOperator"))
+        print(f"Debug info: Found {rows_found} operator rows.")
+        return
+
+    try:
         search_btn = WebDriverWait(bot.browser, 10).until(
             EC.element_to_be_clickable(
                 (
@@ -277,7 +349,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
     else:
         program = "bwl"
 
-    for i in range(total):
+    for i in tqdm.tqdm(range(total), desc="Processing", unit="application"):
         app_start = time.time()  # start timing for this applicant
 
         applicant_num_from_list = f"unknown_idx_{i}"
@@ -367,7 +439,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                 print("FEHLER: Kein Element zum Klicken")
                 continue
 
-            time.sleep(3)
+            time.sleep(1)
             current_handles = bot.browser.window_handles
             new_handles = set(current_handles) - initial_handles
 
@@ -382,7 +454,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
 
             # popup handling
             if i == 0:
-                time.sleep(3)
+                time.sleep(1)
 
             WebDriverWait(bot.browser, 15).until(
                 lambda d: d.execute_script("return document.readyState")
@@ -581,7 +653,8 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                         other_pdfs.extend(paths_list)
 
             has_bachelor_certificate = bool(degree_pdfs)
-            has_transcript = bool(transcript_candidates or best_transcript_path)
+            has_transcript = bool(
+                transcript_candidates or best_transcript_path)
             other_documents = [os.path.basename(p) for p in other_pdfs]
 
             # language certificates
@@ -626,7 +699,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     status = "Not fulfilled"
                 elif not non_vpd_pdfs:
                     print(
-                        "erro: Only VPDs found, no transcript for ECTS evaluation."
+                        "error: Only VPDs found, no transcript for ECTS evaluation."
                     )
                     details_list.append(
                         "Only VPD found, no transcript "
@@ -681,7 +754,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
             decision = "Yes" if status == "Fulfilled" else "No"
 
         except Exception as e:
-            print(f"erro{applicant_num}: {e}")
+            print(f"error {applicant_num}: {e}")
             details_list.append(f"Evaluation error: {e}")
             decision = "No"
 

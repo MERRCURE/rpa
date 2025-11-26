@@ -130,9 +130,9 @@ if __name__ == "__main__":
 
     perform_login(bot, username, password)
 
-    print("Popup (7 Sekunden")
+    print("Popup (1 Sekunden")
     # 2 entfernen
-    time.sleep(2)
+    time.sleep(1)
 
     open_flow(bot)
     run_filterphase_evaluierung(bot, FLOW_URL, config_module)

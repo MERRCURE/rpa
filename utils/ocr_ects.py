@@ -27,15 +27,15 @@ from utils.ocr_engine import extract_ects_ocr
 # ==============================================================================
 
 # CRITICAL FIX: Limit Tesseract threads to prevent CPU explosion
-os.environ["OMP_THREAD_LIMIT"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OMP_THREAD_LIMIT"] = "2"
+os.environ["OMP_NUM_THREADS"] = "2"
 
 @dataclass
 class OCRConfig:
     """Central configuration for OCR."""
     DEFAULT_LANG: str = "deu+eng"
     DEFAULT_PSM: int = 6
-    TIMEOUT_SECONDS: int = 20
+    TIMEOUT_SECONDS: int = 60
     DPI: int = 200
     
     # System Paths (Auto-detected)
@@ -44,7 +44,7 @@ class OCRConfig:
     
     # Threading
     NUM_CPUS: int = max(1, multiprocessing.cpu_count() or 1)
-    MAX_WORKERS: int = max(1, int(NUM_CPUS * 0.5))
+    MAX_WORKERS: int = max(1, int(NUM_CPUS * 0.8))
 
 CONFIG = OCRConfig()
 

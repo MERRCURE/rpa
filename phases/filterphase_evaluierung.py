@@ -214,7 +214,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
         # Store only the integer index of rows that match criteria
         candidate_indices = [
             idx for idx, r in enumerate(rows_initial) 
-            if is_candidate_row(r)
+            if idx > 0 and is_candidate_row(r)
         ]
         total = len(candidate_indices)
         logging.debug(f"TRACE: {total} Zeilen erkannt (Indices: {candidate_indices})")
@@ -337,7 +337,7 @@ def _navigate_to_applicant_detail_by_index(bot, target_index, main_window_handle
     try:
         if bot.browser.current_window_handle != main_window_handle:
             bot.browser.switch_to.window(main_window_handle)
-        time.sleep(0.5)
+        time.sleep(0.1)
 
         # Re-fetch ALL rows
         rows = WebDriverWait(bot.browser, 2).until(EC.presence_of_all_elements_located(ROW_LOCATOR))
@@ -377,7 +377,7 @@ def _navigate_to_applicant_detail_by_index(bot, target_index, main_window_handle
         elif click_element:
             bot.browser.execute_script("arguments[0].click();", click_element)
 
-        time.sleep(1)
+        time.sleep(0.1)
         new_handles = set(bot.browser.window_handles) - initial_handles
         
         if not new_handles and "applicationEditor-flow" in bot.browser.current_url:
@@ -391,7 +391,7 @@ def _navigate_to_applicant_detail_by_index(bot, target_index, main_window_handle
             return False
 
         WebDriverWait(bot.browser, 2).until(lambda d: d.execute_script("return document.readyState") == "complete")
-        time.sleep(1)
+        time.sleep(0.1)
         return True
 
     except Exception as e:
@@ -605,5 +605,5 @@ def _handle_application_buttons(bot):
         if btns:
             bot.browser.execute_script("arguments[0].click();", btns[0])
             WebDriverWait(bot.browser, 2).until(lambda d: d.execute_script("return document.readyState") == "complete")
-            time.sleep(0.5)
+            time.sleep(0.1)
     except Exception: pass

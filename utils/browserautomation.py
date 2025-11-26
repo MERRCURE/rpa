@@ -25,17 +25,17 @@ class BrowserAutomation:
         except Exception:
             logging.error("Timeout: kein readyState=complete")
 
-        try:
-            body_visible = WebDriverWait(self.browser, 1).until(
-                lambda d: d.execute_script(
-                    "return document.body.style.visibility") != "hidden"
-            )
-            if body_visible:
-                logging.debug("Seite sichtbar.")
-        except Exception:
-            self.browser.execute_script(
-                "document.body.style.visibility='visible';")
-            logging.warn("sichtbarkeit manuell (?)")
+        #try:
+        #    body_visible = WebDriverWait(self.browser, 1).until(
+        #        lambda d: d.execute_script(
+        #            "return document.body.style.visibility") != "hidden"
+        #    )
+        #    if body_visible:
+        #        logging.debug("Seite sichtbar.")
+        #except Exception:
+        #    self.browser.execute_script(
+        #        "document.body.style.visibility='visible';")
+        #    logging.warn("sichtbarkeit manuell (?)")
 
     def add_input(self, by: By, value: str, text: str):
         """auf DOM praesenz warten"""
@@ -43,7 +43,7 @@ class BrowserAutomation:
             field = WebDriverWait(self.browser, 2).until(
                 EC.presence_of_element_located((by, value))
             )
-            time.sleep(0.5)
+            time.sleep(0.1)
             self.browser.execute_script(
                 "arguments[0].scrollIntoView(true);", field)
             field.clear()

@@ -139,8 +139,8 @@ def main():
 
     perform_login(bot, username, password)
 
-    logging.debug("Waiting for popup (1 second)...")
-    time.sleep(1)
+    logging.debug("Waiting for popup (0.1 second)...")
+    time.sleep(0.1)
 
     logging.debug("Open flow...")
     open_flow(bot)

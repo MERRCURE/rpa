@@ -17,7 +17,7 @@ def wait_for_any_file(download_dir, pattern="*.zip", timeout=40, prev=None):
         new = current - prev_set
         if new:
             return sorted(list(new), key=lambda p: os.path.getmtime(p))[-1]
-        time.sleep(0.5)
+        time.sleep(0.05)
     return None
 
 

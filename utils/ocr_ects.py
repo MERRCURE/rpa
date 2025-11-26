@@ -6,6 +6,12 @@ import time
 import hashlib
 import multiprocessing
 from multiprocessing.pool import ThreadPool
+from func_timeout import func_timeout, FunctionTimedOut
+
+# CRITICAL FIX: Prevent Tesseract from spawning its own threads
+# This limits Tesseract to 4 thread per process, preventing the CPU explosion.
+os.environ["OMP_THREAD_LIMIT"] = "4"
+os.environ["OMP_NUM_THREADS"] = "4"
 
 try:
     from pdf2image import convert_from_path
@@ -150,12 +156,12 @@ POPPLER_PATH = get_poppler_path()
 def ensure_ocr_available():
     if convert_from_path is None or pytesseract is None:
         raise RuntimeError(
-            "OCR not avialble   (pdf2image/pytesseract )."
+            "OCR not available (pdf2image/pytesseract)."
         )
     return True
 
 
-def _ocr_text_from_pdf_cached(pdf_path: str, dpi: int = 200, psm: int = 6) -> str:
+def _ocr_text_from_pdf_cached(pdf_path: str, dpi: int = 100, psm: int = 6) -> str:
     if convert_from_path is None or pytesseract is None:
         raise RuntimeError("OCR not available (pdf2image/pytesseract ).")
 
@@ -167,26 +173,37 @@ def _ocr_text_from_pdf_cached(pdf_path: str, dpi: int = 200, psm: int = 6) -> st
     print(f"Start OCR for {pdf_path} (dpi={dpi}, psm={psm})")
     images = convert_from_path(pdf_path, dpi=dpi, poppler_path=POPPLER_PATH)
 
-    config = f"--psm {psm}"
-
     def _ocr_page(img):
         try:
             return pytesseract.image_to_string(
-                img, lang="deu+eng", config=config
+                img, 
+                lang="deu+eng", 
+                config=f"--psm {psm}",
+                timeout=10 
             )
+        except RuntimeError as e:
+            # Pytesseract raises RuntimeError when the subprocess times out
+            if "timeout" in str(e).lower():
+                print(f"OCR TIMEOUT (>10s) on a page in {pdf_path}")
+            else:
+                print(f"OCR Error on a page in {pdf_path}: {e}")
+                return ""  # Return empty string so the rest of the PDF is still joined successfully
         except Exception as e:
-            print(f"OCR-error  {pdf_path}: {e}")
+            print(f"General Error: {e}")
             return ""
-
-    with ThreadPool(min(len(images), _MAX_THREADS)) as pool:
-        text_parts = pool.map(_ocr_page, images)
+        
+    text_parts = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(images), _MAX_THREADS)) as executor:
+        # 'map' maintains the order of pages (Important for PDFs!)
+        results = executor.map(_ocr_page, images)
+        text_parts = list(results)
 
     full_text = "\n".join(text_parts)
     _OCR_TEXT_CACHE[cache_key] = full_text
     return full_text
 
 
-def ocr_text_from_pdf(pdf_path, dpi=200):
+def ocr_text_from_pdf(pdf_path, dpi=100):
     return _ocr_text_from_pdf_cached(pdf_path, dpi=dpi, psm=6)
 
 
@@ -202,6 +219,7 @@ def extract_ocr_note(text: str):
         "abschlussnote",
         "abschlusspruefung",
         "abschlussprüfung",
+        "average mark",
         "overall grade",
         "overall result",
         "overall mark",
@@ -244,11 +262,21 @@ def extract_ects_hybrid(pdf_path, module_map, categories):
         print(f"error: extract not found: {pdf_path}")
         return {cat: 0.0 for cat in categories}, [], [], "ocr_hocr"
 
-    print(f"starte {os.path.basename(pdf_path)}")
-
-    sums, matched_modules, unrecognized, method = extract_ects_ocr(
-        pdf_path, module_map, categories
-    )
+    print(f"OCR starte {os.path.basename(pdf_path)}")
+    try:
+        # Run extract_ects_ocr with a 10-second hard limit
+        sums, matched_modules, unrecognized, method = func_timeout(
+            10, 
+            extract_ects_ocr, 
+            args=(pdf_path, module_map, categories)
+        )
+    except FunctionTimedOut:
+        print(f"OCR abgebrochen (Timeout > 10s) für {os.path.basename(pdf_path)}")
+        # Set default empty values so your code doesn't crash later
+        sums, matched_modules, unrecognized, method = ({}, [], [], "FAILED_TIMEOUT")
+    except Exception as e:
+        print(f"OCR Error: {e}")
+        sums, matched_modules, unrecognized, method = ({}, [], [], "FAILED_ERROR")
 
     print(f"ocr finished with {method}, sum {sum(sums.values())}")
     return sums, matched_modules, unrecognized, method

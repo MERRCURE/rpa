@@ -83,23 +83,21 @@ print(
 )
 
 
+UMLAUT_PATTERN = re.compile(r"[äöüß]")
+NON_ALPHANUM_PATTERN = re.compile(r"[^a-z0-9\s]")
+WHITESPACE_PATTERN = re.compile(r"\s+")
+UMLAUT_MAP = {
+    "ä": "ae",
+    "ö": "oe",
+    "ü": "ue",
+    "ß": "ss",
+}
 def normalize_text(s: str) -> str:
-
     s = s.lower()
-
-    replacements = {
-        "ä": "ae",
-        "ö": "oe",
-        "ü": "ue",
-        "ß": "ss",
-    }
-    for src, tgt in replacements.items():
-        s = s.replace(src, tgt)
-
-    s = re.sub(r"[^a-z0-9\s]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
+    s = UMLAUT_PATTERN.sub(lambda match: UMLAUT_MAP[match.group(0)], s)
+    s = NON_ALPHANUM_PATTERN.sub(" ", s)
+    s = WHITESPACE_PATTERN.sub(" ", s).strip()
     return s
-
 
 def is_trash_line(line: str) -> bool:
 

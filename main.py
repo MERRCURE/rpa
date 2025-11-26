@@ -12,8 +12,14 @@ from selenium.webdriver.chrome.options import Options
 from utils.browserautomation import BrowserAutomation
 from phases.filterphase_evaluierung import run_filterphase_evaluierung
 
+import logging
+logging.basicConfig(
+    level=logging.DEBUG, # Change this to logging.INFO to hide debugs
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S"
+)
 
-# 1 URL
+LOGIN_URL = "https://digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
 FLOW_URL = "https://digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
 
 
@@ -37,10 +43,10 @@ def create_chrome_options(download_dir):
 
 
 def perform_login(bot, username, password):
-    print(" Login filled")
+    logging.info("Performing Login...")
 
     try:
-        wait = WebDriverWait(bot.browser, 15)
+        wait = WebDriverWait(bot.browser, 2)
         user_field = wait.until(
             EC.presence_of_element_located((By.ID, "asdf")))
         pass_field = wait.until(
@@ -54,34 +60,34 @@ def perform_login(bot, username, password):
         pass_field.send_keys(password)
         login_btn.click()
 
-        print("button clicked")
+        logging.debug("Clicked on login button")
     except Exception as e:
-        print(f"login failed{e}")
+        logging.error(f"login failed{e}")
         return False
 
     try:
 
-        WebDriverWait(bot.browser, 15).until(
+        WebDriverWait(bot.browser, 2).until(
             lambda d: "startFlow" in d.current_url or "portal" in d.current_url
         )
-        print("login succesfull plus redirect")
+        logging.info("Login succesfull plus redirect")
         return True
     except Exception:
-        print("erro:popup active")
+        logging.error("Could not Login, maybe there is another (.htaccess-based) popup active?")
         return False
 
 
 def open_flow(bot):
-    print("open page")
+    logging.info("Opening page")
     bot.open_url(FLOW_URL)
-    WebDriverWait(bot.browser, 15).until(
+    WebDriverWait(bot.browser, 2).until(
         lambda d: d.execute_script("return document.readyState") == "complete"
     )
-    print("site found")
+    logging.info("Found site")
 
-
-if __name__ == "__main__":
-
+def main():
+    logging.debug("Obtaining configuration and credentials...")
+    ### OBTAIN CONFIG+CREDENTIALS
     parser = argparse.ArgumentParser(
         description="start")
     parser.add_argument(
@@ -95,19 +101,19 @@ if __name__ == "__main__":
     try:
 
         config_module = importlib.import_module(f"config.{config_name}")
-        print(f"INFO: Konfiguration '{config_name}' erfolgreich geladen")
+        logging.info(f"Konfiguration '{config_name}' erfolgreich geladen")
 
         try:
             download_dir = config_module.DOWNLOAD_DIR
             os.makedirs(download_dir, exist_ok=True)
-            print(f"INFO: Download secured under : {download_dir}")
+            logging.info(f"Download secured under : {download_dir}")
         except AttributeError:
-            print(f"FATAL: 'DOWNLOAD_DIR'not found '{config_name}.py' ")
+            logging.critical(f"'DOWNLOAD_DIR' not found '{config_name}.py' ")
             sys.exit(1)
 
     except ImportError:
-        print(
-            f"error: config '{config_name}.py' not found ")
+        logging.critical(
+            f"config '{config_name}.py' not found ")
         sys.exit(1)
 
     args = parser.parse_args()
@@ -119,23 +125,27 @@ if __name__ == "__main__":
     username = credentials["username"]
     password = credentials["password"]
 
+    ### START BROWSER
+    logging.debug("Opening browser...")
     chrome_options = create_chrome_options(download_dir)
     bot = BrowserAutomation(options=chrome_options)
 
-    # 1 url
-    login_url = "https://digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
-    print("STATUS open ")
-    bot.open_url(login_url)
-    print("STATUS: ready")
+    logging.debug("Opening URL...")
+    bot.open_url(LOGIN_URL)
+    logging.debug("Logging in...")
 
     perform_login(bot, username, password)
 
-    print("Popup (7 Sekunden")
-    # 2 entfernen
-    time.sleep(2)
+    logging.debug("Waiting for popup (1 second)...")
+    time.sleep(1)
 
+    logging.debug("Open flow...")
     open_flow(bot)
+    logging.debug("Filterphase Evaluierung...")
     run_filterphase_evaluierung(bot, FLOW_URL, config_module)
 
-    print("STATUS: DONE")
-    input("ENTER = finish ")
+    logging.info("Done.")
+#    input("ENTER = finish ")# why not just terminate the program at the end? makes profiling easier.
+
+if __name__ == "__main__":
+    main()

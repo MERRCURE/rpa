@@ -2,6 +2,8 @@ import os
 import re
 import time
 import csv
+import tqdm
+import logging
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -32,6 +34,7 @@ ROW_LOCATOR = (
     "//table//tr[.//td and not(contains(@style,'display:none'))]",
 )
 
+BEWERBERNUMMER = re.compile(r"\b(\d{5,})\b")
 
 def init_paths_from_config(config):
     base_dir = os.path.dirname(__file__)
@@ -75,7 +78,7 @@ def init_paths_from_config(config):
 def load_whitelist(csv_path):
     whitelist = set()
     if not csv_path or not os.path.exists(csv_path):
-        print("Keine Whitelist-Datei angegeben.")
+        logging.warn("Keine Whitelist-Datei angegeben.")
         return whitelist
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -83,14 +86,14 @@ def load_whitelist(csv_path):
         for row in reader:
             if row and row[0].strip():
                 whitelist.add(row[0].strip().lower())
-    print(f"Whitelist geladen: {len(whitelist)} Einträge.")
+    logging.info(f"Whitelist geladen: {len(whitelist)} Einträge.")
     return whitelist
 
 
 def load_module_mapping(csv_path):
     mapping = {}
     if not os.path.exists(csv_path):
-        print(f"eror: Mapping  fehlt: {csv_path}")
+        logging.warn(f"Mapping  fehlt: {csv_path}")
         return mapping
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -99,7 +102,7 @@ def load_module_mapping(csv_path):
             cat = r.get("category") or r.get("Kategorie")
             if key and cat:
                 mapping[key.strip().lower()] = cat.strip()
-    print(f"Modul-Mapping geladen: {len(mapping)} eintraege.")
+    logging.info(f"Modul-Mapping geladen: {len(mapping)} eintraege.")
     return dict(
         sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True)
     )
@@ -110,17 +113,15 @@ def is_candidate_row(row):
         cells = row.find_elements(By.TAG_NAME, "td")
         if not cells or len(cells) < 3:
             return False
-        text = " ".join([c.text.strip().lower() for c in cells])
-        if "bewerbung" in text or re.search(r"\b\d{5,}\b", text):
-            return True
-        return False
+        text = " ".join(c.text.strip().lower() for c in cells)
+        return ("bewerbung" in text) or BEWERBERNUMMER.search(text)
     except Exception:
         return False
 
 
 def get_applicant_number_from_detail_page(browser):
     try:
-        el = WebDriverWait(browser, 5).until(
+        el = WebDriverWait(browser, 1).until(
             EC.presence_of_element_located(
                 (
                     By.XPATH,
@@ -131,7 +132,7 @@ def get_applicant_number_from_detail_page(browser):
             )
         )
         txt = el.text.strip()
-        m = re.search(r"\b(\d{5,})\b", txt)
+        m = BEWERBERNUMMER.search(txt)
         if m:
             return m.group(1)
         return f"unknown_{int(time.time())}"
@@ -183,14 +184,14 @@ def evaluate_requirements_ects(ects_data, matched_modules, unrecognized, config)
 
 
 def run_filterphase_evaluierung(bot, flow_url, config):
-    print("Starte Evaluierung...")
+    logging.info("Starte Evaluierung...")
     eval_start = time.time()
 
     paths = init_paths_from_config(config)
     try:
         ensure_ocr_available()
     except RuntimeError as e:
-        print(f"FATAL: {e}. Breche Evaluierung ab.")
+        logging.error(f"FATAL: {e}. Breche Evaluierung ab.")
         return
 
     module_map = load_module_mapping(paths["module_map_csv"])
@@ -229,7 +230,74 @@ def run_filterphase_evaluierung(bot, flow_url, config):
         writer.writerow(header)
 
     try:
-        search_btn = WebDriverWait(bot.browser, 10).until(
+        # --- STEP 0: Safety Check ---
+        # Wait until there are at least 3 "Operator" rows on the screen.
+        # This prevents the script from running before the "Add" button click has finished.
+        WebDriverWait(bot.browser, 1).until(
+            lambda driver: len(driver.find_elements(By.CLASS_NAME, "dropdownEqualOperator")) >= 4
+        )
+
+        # Define the operator you want: "=" or "≠"
+        target_operator = "≠" 
+        
+        # --- STEP 1: Click the 3rd Operator Dropdown ---
+        # Strategy: Find the 3rd container div, then find the dropdown inside it.
+        operator_trigger = WebDriverWait(bot.browser, 1).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "(//div[contains(@class, 'dropdownEqualOperator')])[4]//div[contains(@class, 'ui-selectonemenu')]"
+                )
+            )
+        )
+        bot.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", operator_trigger)
+        operator_trigger.click()
+        
+        # Click the operator option
+        operator_option = WebDriverWait(bot.browser, 1).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    f"//li[contains(@class, 'ui-selectonemenu-item')][normalize-space()='{target_operator}']"
+                )
+            )
+        )
+        operator_option.click()
+        
+        # --- STEP 2: Click the 3rd Status Dropdown ---
+        target_status_text = "In Vorbereitung" 
+        
+        # Strategy: Find the 3rd Operator container again, and look for the 
+        # dropdown that is its IMMEDIATE NEIGHBOR (following-sibling).
+        status_trigger = WebDriverWait(bot.browser, 1).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "(//div[contains(@class, 'dropdownEqualOperator')])[4]/following-sibling::div[contains(@class, 'ui-selectonemenu')]"
+                )
+            )
+        )
+        status_trigger.click()
+        
+        # Click the status option
+        status_option = WebDriverWait(bot.browser, 1).until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    f"//li[contains(@class, 'ui-selectonemenu-item')][normalize-space()='{target_status_text}']"
+                )
+            )
+        )
+        status_option.click()
+
+    except Exception as e:
+        logging.error(f"Error in dropdown selection: {e}")
+        rows_found = len(bot.browser.find_elements(By.CLASS_NAME, "dropdownEqualOperator"))
+        logging.debug(f"Found {rows_found} operator rows.")
+        return
+    
+    try:
+        search_btn = WebDriverWait(bot.browser, 1).until(
             EC.element_to_be_clickable(
                 (
                     By.XPATH,
@@ -242,34 +310,34 @@ def run_filterphase_evaluierung(bot, flow_url, config):
         bot.browser.execute_script(
             "arguments[0].scrollIntoView(true);", search_btn
         )
-        time.sleep(0.5)
+        time.sleep(0.1)
         bot.browser.execute_script("arguments[0].click();", search_btn)
-        print(" Warte auf Ergebnisse...")
-        WebDriverWait(bot.browser, 10).until(
+        logging.debug("Warte auf Ergebnisse...")
+        WebDriverWait(bot.browser, 1).until(
             EC.visibility_of_element_located(
                 (By.CSS_SELECTOR, "span.dataScrollerResultText")
             )
         )
 
     except Exception as e:
-        print(f"error :  {e}")
+        logging.error(f"{e}")
         return
 
     try:
         rows_initial = bot.browser.find_elements(*ROW_LOCATOR)
         candidate_rows = [r for r in rows_initial if is_candidate_row(r)]
         total = len(candidate_rows)
-        print(f"TRACE: {total} Zeilen erkannt")
+        logging.debug(f"TRACE: {total} Zeilen erkannt")
     except Exception as count_e:
-        print(f"error: Konnte Zeilen nicht finden {count_e}")
+        logging.error(f"Konnte Zeilen nicht finden {count_e}")
         return
 
     if total == 0:
-        print("Keine Bewerber gefunden.")
+        logging.info("Keine Bewerber gefunden.")
         return
 
     main_window_handle = bot.browser.current_window_handle
-    print(f"DEBUG: Handle: {main_window_handle}")
+    logging.debug(f"Handle: {main_window_handle}")
 
     module_csv_path = paths["module_map_csv"]
     if "mathemodule" in module_csv_path.lower():
@@ -277,7 +345,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
     else:
         program = "bwl"
 
-    for i in range(total):
+    for i in tqdm.tqdm(range(total), desc="Processing", unit="application"):
         app_start = time.time()  # start timing for this applicant
 
         applicant_num_from_list = f"unknown_idx_{i}"
@@ -302,13 +370,13 @@ def run_filterphase_evaluierung(bot, flow_url, config):
         status = "Nicht erfuellt"
 
         try:
-            print(f" Verarbeitung {i+1}/{total} (Index {i}) ---")
+            logging.debug(f" Verarbeitung {i+1}/{total} (Index {i})")
 
             if bot.browser.current_window_handle != main_window_handle:
                 bot.browser.switch_to.window(main_window_handle)
             time.sleep(0.5)
 
-            rows = WebDriverWait(bot.browser, 10).until(
+            rows = WebDriverWait(bot.browser, 2).until(
                 EC.presence_of_all_elements_located(ROW_LOCATOR)
             )
             candidate_rows = [r for r in rows if is_candidate_row(r)]
@@ -323,7 +391,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     ".//td[contains(@class,'column3') or contains(@class,'column 3')][1]",
                 )
                 row_text = td_num.text.strip()
-                mnum = re.search(r"\b(\d{5,})\b", row_text)
+                mnum = BEWERBERNUMMER.search(row_text)
                 if mnum:
                     applicant_num_from_list = mnum.group(1)
                     applicant_num = applicant_num_from_list
@@ -348,8 +416,8 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     )
                     element_for_js_click = button_element
                 except NoSuchElementException:
-                    print(
-                        f"erro: kein Button für Bewerber {applicant_num_from_list} gefunden"
+                    logging.error(
+                        f"kein Button für Bewerber {applicant_num_from_list} gefunden"
                     )
                     continue
 
@@ -364,15 +432,15 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     "arguments[0].click();", element_for_js_click
                 )
             else:
-                print("FEHLER: Kein Element zum Klicken")
+                logging.error("Kein Element zum Klicken")
                 continue
 
-            time.sleep(3)
+            time.sleep(1)
             current_handles = bot.browser.window_handles
             new_handles = set(current_handles) - initial_handles
 
             if not new_handles and "applicationEditor-flow" not in bot.browser.current_url:
-                print("FEHLER: Neuer Tab nicht geoeffnet")
+                logging.error("Neuer Tab nicht geoeffnet")
                 continue
             elif not new_handles and "applicationEditor-flow" in bot.browser.current_url:
                 new_tab_handle = main_window_handle
@@ -382,17 +450,17 @@ def run_filterphase_evaluierung(bot, flow_url, config):
 
             # popup handling
             if i == 0:
-                time.sleep(3)
+                time.sleep(1)
 
-            WebDriverWait(bot.browser, 15).until(
+            WebDriverWait(bot.browser, 2).until(
                 lambda d: d.execute_script("return document.readyState")
                 == "complete"
             )
             time.sleep(1)
 
             applicant_num = get_applicant_number_from_detail_page(bot.browser)
-            print(
-                f"DEBUG: Aktuelle Bewerbernummer im Detail-Tab: {applicant_num}"
+            logging.debug(
+                f"Aktuelle Bewerbernummer im Detail-Tab: {applicant_num}"
             )
 
             # Antrags-Button (falls mehrere Anträge)
@@ -403,13 +471,13 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                 )
                 if application_buttons:
                     btn_text = application_buttons[0].text
-                    print(
-                        f"INFO: {len(application_buttons)} Wähle ersten: '{btn_text}'"
+                    logging.info(
+                        f"{len(application_buttons)} Wähle ersten: '{btn_text}'"
                     )
                     bot.browser.execute_script(
                         "arguments[0].click();", application_buttons[0]
                     )
-                    WebDriverWait(bot.browser, 10).until(
+                    WebDriverWait(bot.browser, 2).until(
                         lambda d: d.execute_script(
                             "return document.readyState"
                         )
@@ -417,7 +485,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     )
                     time.sleep(0.5)
             except Exception as e:
-                print(f"error: {e}")
+                logging.error(f"{e}")
 
             # DOM-Infos (Claimed, Uni, Country)
             claimed = extract_claimed_from_dom(bot.browser, config)
@@ -432,10 +500,10 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     "//h2[contains(., 'Masterzugangsberechtigung (A)')]",
                 )
                 is_non_eu = True
-                print("INFO: Applicant classified as Non-EU (A).")
+                logging.info("Applicant classified as Non-EU (A).")
             except NoSuchElementException:
                 is_non_eu = False
-                print("INFO: Applicant classified as German/EU (D).")
+                logging.info("Applicant classified as German/EU (D).")
 
             # pdf download
             pdfs = download_pdfs_for_applicant(
@@ -476,7 +544,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
 
             if vpd_pdfs:
                 has_vpd = True
-                print("INFO: VPD  found")
+                logging.info("VPD  found")
                 vpd_pdf = vpd_pdfs[0]
                 text_vpd = ocr_text_from_pdf(vpd_pdf)
                 if not text_vpd:
@@ -486,7 +554,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
             elif is_non_eu:
                 ocr_note = None
             else:
-                print("INFO: No VPD found")
+                logging.info("No VPD found")
                 combined_text = ""
                 for gpdf in grade_pdfs:
                     combined_text += "\n" + (ocr_text_from_pdf(gpdf) or "")
@@ -496,7 +564,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                     ocr_note = extract_ocr_note(combined_text)
                 if ocr_note is None and pdfs:
                     main_pdf_path_for_note = max(pdfs, key=os.path.getsize)
-                    print(" Fallback OCR on largest PDF")
+                    logging.info(" Fallback OCR on largest PDF")
                     fallback_text = ocr_text_from_pdf(main_pdf_path_for_note)
                     if not fallback_text:
                         ocr_note = None
@@ -601,8 +669,8 @@ def run_filterphase_evaluierung(bot, flow_url, config):
             )
 
             if is_whitelisted:
-                print(
-                    f"INFO: Applicant {applicant_num} is on the whitelist (match: '{uni_match}')."
+                logging.info(
+                    f"Applicant {applicant_num} is on the whitelist (match: '{uni_match}')."
                 )
                 extraction_method = "Whitelist"
                 status_ects, details_ects = evaluate_requirements_ects(
@@ -616,17 +684,17 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                 else:
                     status = "Not fulfilled"
             else:
-                print(
-                    f"INFO: Applicant {applicant_num} is not on whitelist"
+                logging.info(
+                    f"Applicant {applicant_num} is not on whitelist"
                 )
 
                 if not pdfs:
-                    print("error: No PDFs found ")
+                    logging.error("No PDFs found ")
                     details_list.append("No PDFs for ECTS evaluation.")
                     status = "Not fulfilled"
                 elif not non_vpd_pdfs:
-                    print(
-                        "erro: Only VPDs found, no transcript for ECTS evaluation."
+                    logging.error(
+                        "Only VPDs found, no transcript for ECTS evaluation."
                     )
                     details_list.append(
                         "Only VPD found, no transcript "
@@ -646,8 +714,8 @@ def run_filterphase_evaluierung(bot, flow_url, config):
                             f"Transcript chosen by OCR classifier: {os.path.basename(main_pdf_path)}"
                         )
 
-                    print(
-                        f"DEBUG: Start hybrid ECTS extraction (OCR lab) for main PDF: {os.path.basename(main_pdf_path)}"
+                    logging.debug(
+                        f"Start hybrid ECTS extraction (OCR lab) for main PDF: {os.path.basename(main_pdf_path)}"
                     )
                     sums, matched, unrec, method = extract_ects_hybrid(
                         main_pdf_path,
@@ -681,7 +749,7 @@ def run_filterphase_evaluierung(bot, flow_url, config):
             decision = "Yes" if status == "Fulfilled" else "No"
 
         except Exception as e:
-            print(f"erro{applicant_num}: {e}")
+            logging.error(f"{applicant_num}: {e}")
             details_list.append(f"Evaluation error: {e}")
             decision = "No"
 
@@ -727,22 +795,22 @@ def run_filterphase_evaluierung(bot, flow_url, config):
             writer = csv.writer(of)
             writer.writerow(csv_row)
 
-        print(
-            f"trace : Result for {applicant_num} written. Decision: {decision}. Details: {details_str}"
+        logging.debug(
+            f"Result for {applicant_num} written. Decision: {decision}. Details: {details_str}"
         )
 
         # zurück zum main tab
         try:
             if bot.browser.current_window_handle != main_window_handle:
-                print(
-                    f"DEBUG: Schließe Tab {bot.browser.current_window_handle}..."
+                logging.debug(
+                    f"Schließe Tab {bot.browser.current_window_handle}..."
                 )
                 bot.browser.close()
                 bot.browser.switch_to.window(main_window_handle)
-                print(f"DEBUG: back zum Haupt-Tab {main_window_handle}.")
+                logging.debug(f"back zum Haupt-Tab {main_window_handle}.")
         except Exception as fe:
-            print(f"WARNUNG: Fehler beim Tab-Schließen: {fe}")
+            logging.error(f"Fehler beim Tab-Schließen: {fe}")
 
     total_time = time.time() - eval_start
-    print(f"info: Total evaluation time: {total_time:.2f} seconds")
-    print(f"abgeschlossen. CSV: {paths['output_csv']}")
+    logging.debug(f"Total evaluation time: {total_time:.2f} seconds")
+    logging.debug(f"abgeschlossen. CSV: {paths['output_csv']}")

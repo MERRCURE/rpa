@@ -7,17 +7,14 @@ import pytesseract
 
 from .ocr_engine import normalize_text
 
-
-def quick_ocr_preview(pdf_path: str, dpi: int = 200, psm: int = 6, max_pages: int = 2) -> str:
-
-    pages = convert_from_path(pdf_path, dpi=dpi)
-    text_parts = []
-    for i, img in enumerate(pages):
-        if i >= max_pages:
-            break
-        cfg = f"--psm {psm}"
-        txt = pytesseract.image_to_string(img, lang="deu+eng", config=cfg)
-        text_parts.append(txt)
+def quick_ocr_preview(pdf_path: str, dpi: int = 100, psm: int = 6, max_pages: int = 2) -> str:
+    print("--> Here, secretly also doing some extra OCR <--")
+    print(f"   {pdf_path}")
+    pages = convert_from_path(pdf_path, dpi=dpi, last_page=max_pages)
+    text_parts = [
+        pytesseract.image_to_string(img, lang="deu+eng", config=f"--psm {psm}")
+        for img in pages
+        ]
     return "\n".join(text_parts)
 
 
@@ -165,8 +162,8 @@ def score_vpd(text_low: str) -> int:
 
 
 def classify_document(pdf_path: str, program: str):
-
-    text = quick_ocr_preview(pdf_path, dpi=200, psm=6, max_pages=2)
+    print("Hmm...")
+    text = quick_ocr_preview(pdf_path, dpi=100, psm=6, max_pages=2)
     if not text.strip():
         return "other", {"transcript": 0, "language_certificate": 0,
                          "degree_certificate": 0, "vpd": 0}
@@ -204,6 +201,7 @@ def classify_many(pdf_paths, program: str):
     best_transcript = (None, None)
     best_transcript_score = -1
 
+    print("Aha....")
     for p in pdf_paths:
         doc_type, scores = classify_document(p, program)
         by_type.setdefault(doc_type, []).append(p)

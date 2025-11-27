@@ -19,12 +19,14 @@ TRANSCRIPT_KEYWORDS = [
     "grade history", "performance report", "performance transcript",
 ]
 ECTS_KEYWORDS = ["ects", "leistungspunkte", "credits", "credit points", "cp "]
-SEMESTER_RE = re.compile(r"(wise|sose|wintersemester|sommersemester|ws ?20|ss ?20)")
+SEMESTER_RE = re.compile(
+    r"(wise|sose|wintersemester|sommersemester|ws ?20|ss ?20)")
 LINE_WITH_DIGIT_RE = re.compile(r"^.*\d.*$", re.MULTILINE)
+
 
 def score_transcript(text_low: str, text_norm: str) -> int:
     score = 0
-    
+
     if any(kw in text_low for kw in TRANSCRIPT_KEYWORDS):
         score += 4
 
@@ -36,11 +38,12 @@ def score_transcript(text_low: str, text_norm: str) -> int:
 
     # Heuristic: Transcripts usually have many lines with numbers (grades/credits)
     numeric_line_count = len(LINE_WITH_DIGIT_RE.findall(text_low))
-    
+
     if numeric_line_count > 20:
         score += 1
 
     return score
+
 
 GERMAN_CERT_KEYWORDS = [
     "dsh-2", "dsh-3", "testdaf", "goethe-zertifikat c2",
@@ -58,6 +61,7 @@ ENGLISH_CERT_KEYWORDS = [
     "linguaskill", "language test report form", "english language test",
 ]
 ENGLISH_GENERIC_KEYWORDS = ("overall band", "overall score")
+
 
 def score_language_cert(text_low: str, program: str) -> int:
     score = 0
@@ -78,6 +82,38 @@ def score_language_cert(text_low: str, program: str) -> int:
     return score
 
 
+MODULE_OVERVIEW_KEYWORDS = [
+
+    "module overview",
+    "modulübersicht",
+    "moduluebersicht",
+    "curriculum",
+    "course catalogue",
+    "module catalogue",
+    "study plan",
+    "modulkatalog",
+]
+
+GRADE_WORDS = ["note", "grade", "bewertung", "ergebnis", "result"]
+
+
+def score_module_overview(text_low: str) -> int:
+    score = 0
+
+    if any(kw in text_low for kw in MODULE_OVERVIEW_KEYWORDS):
+        score += 5
+
+    ects_count = text_low.count("ects") + text_low.count("lp")
+    if ects_count >= 5:
+        score += 3
+
+    # Should not  contain many grade keywords hopefully distingushed from transcipt relieable
+    if sum(text_low.count(gw) for gw in GRADE_WORDS) < 3:
+        score += 2
+
+    return score
+
+
 DEGREE_KEYWORDS = [
     "bachelorzeugnis", "zeugnis", "urkunde", "bachelor of science",
     "bachelor of arts", "bachelor of engineering", "bachelor of",
@@ -87,9 +123,10 @@ DEGREE_KEYWORDS = [
 DEGREE_GRADE_KEYWORDS = ["gesamtnote", "abschlussnote", "overall grade"]
 TRANSCRIPT_INDICATORS = ("transcript", "ects", "credits")
 
+
 def score_degree_certificate(text_low: str, text_norm: str) -> int:
     score = 0
-    
+
     if any(kw in text_low for kw in DEGREE_KEYWORDS):
         score += 4
     if any(kw in text_low for kw in DEGREE_GRADE_KEYWORDS):
@@ -102,19 +139,21 @@ def score_degree_certificate(text_low: str, text_norm: str) -> int:
 
     return score
 
+
 VPD_KEYWORDS = [
-    "vorprüfungsdokumentation", 
-    "vorpruefungsdokumentation", 
-    "vpd", 
-    "uni-assist", 
+    "vorprüfungsdokumentation",
+    "vorpruefungsdokumentation",
+    "vpd",
+    "uni-assist",
     "uni assist"
 ]
 # These must ALL be present to trigger the bonus score
 VPD_CONTENT_PHRASES = ("bewertung", "ausländischer hochschulabschluss")
 
+
 def score_vpd(text_low: str) -> int:
     score = 0
-    
+
     # 1. Check strong VPD keywords (OR logic)
     if any(kw in text_low for kw in VPD_KEYWORDS):
         score += 6
@@ -128,12 +167,12 @@ def score_vpd(text_low: str) -> int:
 
 def classify_document(pdf_path: str, program: str) -> Tuple[str, Dict[str, int]]:
     logging.info(f"Classifying: {os.path.basename(pdf_path)}")
-    
+
     # -------------------------------------------------------------
     # OPTIMIZATION: Only OCR the first page for classification
     # -------------------------------------------------------------
     text = ocr_text_from_pdf(pdf_path, max_pages=1)
-    
+
     if not text.strip():
         return "other", {"transcript": 0, "language_certificate": 0, "degree_certificate": 0, "vpd": 0}
 
@@ -141,10 +180,11 @@ def classify_document(pdf_path: str, program: str) -> Tuple[str, Dict[str, int]]
     text_norm = normalize_text(text)
 
     scores = {
+        "module_overview": score_module_overview(text_low),
         "transcript": score_transcript(text_low, text_norm),
         "language_certificate": score_language_cert(text_low, program),
         "degree_certificate": score_degree_certificate(text_low, text_norm),
-        "vpd": score_vpd(text_low)
+        "vpd": score_vpd(text_low),
     }
 
     best_type = max(scores, key=scores.get)
@@ -152,26 +192,27 @@ def classify_document(pdf_path: str, program: str) -> Tuple[str, Dict[str, int]]
 
     # Threshold: If the best match is weak, call it 'other'
     doc_type = best_type if best_score >= 2 else "other"
-    
+
     return doc_type, scores
 
 
 def classify_many(pdf_paths: List[str], program: str):
     by_type = {
+        "module_overview": [],
         "transcript": [],
         "language_certificate": [],
         "degree_certificate": [],
         "vpd": [],
         "other": [],
     }
-    
+
     best_transcript = (None, None)
     best_transcript_score = -1
 
     for pdf_path in pdf_paths:
         doc_type, scores = classify_document(pdf_path, program)
         by_type.setdefault(doc_type, []).append(pdf_path)
-        
+
         # Track the 'strongest' transcript candidate
         if doc_type == "transcript":
             sc = scores.get("transcript", 0)

@@ -9,7 +9,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException
+import unicodedata
+import re
 
+from utils.university_matcher import is_whitelisted_university_in_pdf
 from utils.document_classifier import classify_many
 from utils.language_certificates import (
     evaluate_language_status_bwl,
@@ -140,14 +143,32 @@ def get_applicant_number_from_detail_page(browser):
         return f"unknown_{int(time.time())}"
 
 
+def _norm_uni(x: str) -> str:
+    if not x:
+        return ""
+    x = x.lower()
+    x = unicodedata.normalize("NFKD", x)
+    x = "".join(c for c in x if not unicodedata.combining(c))
+    x = re.sub(r"[^a-z0-9 ]", " ", x)
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
+
 def check_university_whitelist(uni_text: str, whitelist_set):
+    """
+    Strict matching:
+    Whitelist hit only if normalized DOM university name 
+    matches a normalized whitelist entry exactly.
+    No fuzzy logic, no token matching, no city-based matching.
+    """
     if not whitelist_set or not uni_text:
         return False, None
 
-    low = uni_text.lower()
-    for uni_name in whitelist_set:
-        if uni_name in low:
-            return True, uni_name
+    norm_dom = _norm_uni(uni_text)
+
+    for w in whitelist_set:
+        if _norm_uni(w) == norm_dom:
+            return True, w
+
     return False, None
 
 
@@ -297,6 +318,45 @@ def _process_single_applicant(bot, loop_index, target_row_index, main_window_han
         res["claimed"] = extract_claimed_from_dom(bot.browser, config)
         res["uni_name"] = get_university_from_dom(bot.browser)
         res["bachelor_country"] = res["claimed"].get("bachelor_country", "")
+
+
+        
+        # Eaerly 1: claimed grade too low
+        
+        claimed_note = res["claimed"].get("note")
+        req_max = getattr(config, "REQ_NOTE_MAX", 2.4)
+
+        if claimed_note is not None and claimed_note > req_max:
+            res["details_list"].append(
+                f"Claimed grade too low ({claimed_note} > {req_max})."
+            )
+            res["decision"] = "No"
+            res["status_final"] = "Not fulfilled"
+            return res
+
+
+        
+        # Early stop 2: claimed ECTS too low
+        
+        reqs = getattr(config, "REQUIREMENTS", {})
+        ects_claimed_ok = True
+        ects_claimed_problems = []
+
+        for cat, req_val in reqs.items():
+            claimed_val = float(res["claimed"].get(cat, 0.0))
+            if claimed_val < req_val:
+                ects_claimed_ok = False
+                ects_claimed_problems.append(
+                    f"{cat}: claimed {claimed_val} < required {req_val}"
+                )
+
+        if not ects_claimed_ok:
+            res["details_list"].append(
+                "Claimed ECTS insufficient: " + "; ".join(ects_claimed_problems)
+            )
+            res["decision"] = "No"
+            res["status_final"] = "Not fulfilled"
+            return res
         
         is_non_eu = _check_non_eu_status(bot)
         
@@ -457,58 +517,133 @@ def _analyze_grade_logic(pdfs, is_non_eu, res, config):
         res["note_ok"] = False
 
 
+
+
+
 def _analyze_documents_and_ects(pdfs, program, is_non_eu, module_map, whitelist_set, categories, res, config):
-    non_vpd_pdfs = [pdf_path for pdf_path in pdfs if "vpd" not in os.path.basename(pdf_path).lower()]
-    best_transcript_path = None
-    lang_pdfs = []
-    
-    if non_vpd_pdfs:
-        class_result = classify_many(non_vpd_pdfs, program)
-        best_transcript_path, _ = class_result["best_transcript"]
-        
-        res["has_bachelor"] = bool(class_result["by_type"].get("degree_certificate"))
-        res["has_transcript"] = bool(class_result["by_type"].get("transcript") or best_transcript_path)
-        lang_pdfs = class_result["by_type"].get("language_certificate", [])
-        
-        for dtype, paths_list in class_result["by_type"].items():
-            if dtype not in ("transcript", "degree_certificate", "language_certificate", "vpd"):
-                res["other_docs"].extend([os.path.basename(pdf_path) for pdf_path in paths_list])
+    non_vpd_pdfs = [
+        pdf_path for pdf_path in pdfs
+        if "vpd" not in os.path.basename(pdf_path).lower()
+    ]
+    if not non_vpd_pdfs:
+        res["details_list"].append("Only VPD or no usable academic PDFs found.")
+        res["decision"] = "No"
+        res["status_final"] = "Not fulfilled"
+        return
+
+    class_result = classify_many(non_vpd_pdfs, program)
+    has_transcript = bool(class_result["by_type"].get("transcript"))
+    has_degree = bool(class_result["by_type"].get("degree_certificate"))
+    has_mod_overview = bool(class_result["by_type"].get("module_overview"))
+
+    if not (has_transcript or has_degree or has_mod_overview):
+        res["details_list"].append("No academic document detected (no transcript, no degree certificate, no module overview).")
+        res["decision"] = "No"
+        res["status_final"] = "Not fulfilled"
+        return
+
+    best_transcript_path, _ = class_result["best_transcript"]
+    res["has_bachelor"] = has_degree
+    res["has_transcript"] = has_transcript or best_transcript_path is not None
+
+    lang_pdfs = class_result["by_type"].get("language_certificate", [])
+    for dtype, paths_list in class_result["by_type"].items():
+        if dtype not in ("transcript", "degree_certificate", "language_certificate", "vpd"):
+            res["other_docs"].extend([os.path.basename(p) for p in paths_list])
+
+    bc = (res["bachelor_country"] or "").lower()
 
     if program == "bwl":
-        lang_status = evaluate_language_status_bwl(lang_pdfs, res.get("bachelor_country_raw", ""))
+        if bc in ("deutschland","österreich","schweiz","germany","austria","switzerland"):
+            lang_status = "not necessary"
+        else:
+            lang_status = "available" if lang_pdfs else "required but not available"
     else:
-        lang_status = evaluate_language_status_ai(lang_pdfs)
+        english_countries = (
+            "united kingdom","vereinigtes königreich","usa","australia","new zealand",
+            "ireland","canada","vereinigtes königreich","usa","australien","neuseeland","irland","kanada"
+        )
+        if any(x.lower() in bc for x in english_countries):
+            lang_status = "not necessary"
+        else:
+            lang_status = "available" if lang_pdfs else "required but not available"
+
     res["details_list"].append(f"Language status: {lang_status}")
 
-    is_whitelisted, uni_match = check_university_whitelist(res["uni_name"], whitelist_set)
+    is_whitelisted_dom, uni_match_dom = check_university_whitelist(res["uni_name"], whitelist_set)
+
+    is_whitelisted_pdf, uni_match_pdf = is_whitelisted_university_in_pdf(
+        non_vpd_pdfs,
+        whitelist_set,
+        ocr_text_from_pdf
+    )
+
+    is_whitelisted = is_whitelisted_dom or is_whitelisted_pdf
     res["is_whitelisted"] = is_whitelisted
-    status_ects = "Not fulfilled"
 
     if is_whitelisted:
-        logging.info(f"Whitelisted match: {uni_match}")
+        res["details_list"].append(f"University whitelist match: {uni_match_dom or uni_match_pdf}")
         res["extraction_method"] = "Whitelist"
         status_ects, _ = evaluate_requirements_ects(res["claimed"], [], [], config)
-        res["details_list"].append(f"University whitelist: {uni_match}")
         res["details_list"].append(f"ECTS (claimed) status: {status_ects}")
-    else:
-        if not pdfs:
-            res["details_list"].append("No PDFs for ECTS evaluation.")
-        elif not non_vpd_pdfs:
-            res["details_list"].append("Only VPD found, no transcript.")
+        if status_ects == "Fulfilled" and res["note_ok"]:
+            res["status_final"] = "Fulfilled"
         else:
-            main_pdf = best_transcript_path if best_transcript_path else max(non_vpd_pdfs, key=os.path.getsize)
-            if not best_transcript_path:
-                res["details_list"].append("No clear transcript detected, using largest PDF.")
+            res["status_final"] = "Not fulfilled"
+        return
 
-            sums, matched, unrec, method = extract_ects_hybrid(main_pdf, module_map, categories)
-            
-            res["saved_pdf_counts"] = sums
-            res["matched_modules"] = matched
-            res["unrecognized_lines"] = unrec
-            res["extraction_method"] = method
-            
-            status_ects, _ = evaluate_requirements_ects(sums, matched, unrec, config)
-            res["details_list"].append(f"ECTS (OCR) status: {status_ects}")
+    module_overviews = class_result["by_type"].get("module_overview", [])
+    transcript = best_transcript_path
+
+    if module_overviews:
+        main_pdf = module_overviews[0]
+        doc_type_for_ects = "module_overview"
+        res["has_module_overview"] = True
+        res["ects_source_pdf"] = os.path.basename(main_pdf)
+        res["details_list"].append(f"ECTS source: module_overview -> {os.path.basename(main_pdf)}")
+    elif transcript:
+        main_pdf = transcript
+        doc_type_for_ects = "transcript"
+        res["has_module_overview"] = False
+        res["ects_source_pdf"] = os.path.basename(main_pdf)
+        res["details_list"].append(f"ECTS source: transcript -> {os.path.basename(main_pdf)}")
+    else:
+        main_pdf = max(non_vpd_pdfs, key=os.path.getsize)
+        doc_type_for_ects = "fallback"
+        res["has_module_overview"] = False
+        res["ects_source_pdf"] = os.path.basename(main_pdf)
+        res["details_list"].append(f"ECTS source: fallback_largest -> {os.path.basename(main_pdf)}")
+
+    test_text = ocr_text_from_pdf(main_pdf, max_pages=1)
+    if not test_text or len(test_text.strip()) < 20:
+        res["details_list"].append(f"Document unreadable for OCR: {os.path.basename(main_pdf)}")
+        res["decision"] = "No"
+        res["status_final"] = "Not fulfilled"
+        return
+
+    sums, matched, unrec, method = extract_ects_hybrid(main_pdf, module_map, categories, doc_type_for_ects)
+
+    if doc_type_for_ects == "module_overview":
+        total_ects = sum(sums.values())
+        if (total_ects == 0.0 or len(matched) == 0) and transcript:
+            preview = ocr_text_from_pdf(transcript, max_pages=1)
+            digit_lines = sum(1 for ln in preview.splitlines() if any(ch.isdigit() for ch in ln))
+            if digit_lines >= 3:
+                main_pdf = transcript
+                doc_type_for_ects = "transcript"
+                res["has_module_overview"] = False
+                res["ects_source_pdf"] = os.path.basename(main_pdf)
+                res["details_list"].append("Module overview unusable; falling back to transcript.")
+                sums, matched, unrec, method = extract_ects_hybrid(main_pdf, module_map, categories, doc_type_for_ects)
+
+    res["saved_pdf_counts"] = sums
+    res["matched_modules"] = matched
+    res["unrecognized_lines"] = unrec
+    res["extraction_method"] = method
+    res["details_list"].append(f"OCR method: {method}")
+
+    status_ects, _ = evaluate_requirements_ects(sums, matched, unrec, config)
+    res["details_list"].append(f"ECTS (OCR) status: {status_ects}")
 
     if status_ects == "Fulfilled" and res["note_ok"]:
         res["status_final"] = "Fulfilled"
@@ -518,7 +653,9 @@ def _analyze_documents_and_ects(pdfs, program, is_non_eu, module_map, whitelist_
     if is_non_eu and not res["has_vpd"]:
         res["details_list"].append("Documents insufficient: VPD missing for Non-EU applicant.")
 
-        
+
+
+
 def _apply_search_filters(bot):
     try:
         WebDriverWait(bot.browser, 1).until(lambda d: len(d.find_elements(By.CLASS_NAME, "dropdownEqualOperator")) >= 4)
@@ -565,7 +702,13 @@ def _init_csv_file(path, categories):
             "OtherDocuments", "Claimed_Grade", "OCR_Grade", "Grade_Source"]
         header.extend([f"Claimed_{c}" for c in categories])
         header.extend([f"OCR_{c}" for c in categories])
-        header.extend(["MatchedModules", "UnrecognizedLines", "Extraction_Method", "Evaluation_Time_Seconds"])
+        header.extend([
+    "MatchedModules",
+    "UnrecognizedLines",
+    "Extraction_Method",
+    "HasModuleOverview",
+    "ECTS_Source_Document",
+    "Evaluation_Time_Seconds"])
         writer.writerow(header)
 
 def _write_result_to_csv(path, res, categories):
@@ -578,7 +721,17 @@ def _write_result_to_csv(path, res, categories):
     for c in categories: row.append(res["claimed"].get(c, 0.0))
     for c in categories: row.append(res["saved_pdf_counts"].get(c, 0.0))
     
-    row.extend([" | ".join(res["matched_modules"]), " | ".join(res["unrecognized_lines"]), res["extraction_method"], res["duration"]])
+    has_mod_overview = "Yes" if res.get("has_module_overview") else "No"
+    ects_source_pdf = res.get("ects_source_pdf", "")
+
+    row.extend([
+        " | ".join(res["matched_modules"]),
+        " | ".join(res["unrecognized_lines"]),
+        res["extraction_method"],
+        has_mod_overview,
+        ects_source_pdf,
+        res["duration"]
+    ])
     with open(path, "a", newline="", encoding="utf-8") as of:
         csv.writer(of).writerow(row)
 

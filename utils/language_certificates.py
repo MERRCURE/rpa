@@ -24,7 +24,7 @@ def evaluate_language_status_bwl(
 ) -> str:
 
     norm_country = normalize_country_name(bachelor_country_raw or "")
-    if norm_country == "germany":
+    if norm_country in ("Deutschland", "Österreich", "Schweiz"):
         return "not necessary"
 
     if not lang_pdfs:

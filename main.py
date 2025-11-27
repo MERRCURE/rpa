@@ -1,3 +1,9 @@
+from phases.filterphase_evaluierung import run_filterphase_evaluierung
+from utils.browserautomation import BrowserAutomation
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.common.by import By
 import time
 import json
 import os
@@ -7,22 +13,15 @@ import importlib
 import sys
 import logging
 logging.basicConfig(
-    level=logging.INFO, # Change this to logging.INFO to hide debugs
+    level=logging.INFO,  # Change this to logging.INFO to hide debugs
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%H:%M:%S"
 )
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from utils.browserautomation import BrowserAutomation
-from phases.filterphase_evaluierung import run_filterphase_evaluierung
 
-
-
-LOGIN_URL = "https://digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
-FLOW_URL = "https://digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
+# test02 urls
+LOGIN_URL = "https://test02.digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
+FLOW_URL = "https://test02.digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
 
 
 def create_chrome_options(download_dir):
@@ -30,8 +29,8 @@ def create_chrome_options(download_dir):
 
     chrome_options.add_argument("--ignore-certificate-errors")
     chrome_options.add_argument("--enable-javascript")
-#    chrome_options.add_argument("--window-size=1400,900")
-    chrome_options.add_argument("--headless") # prevents focus stealing, can work alongside ;-)
+    chrome_options.add_argument("--window-size=1400,900")
+    # chrome_options.add_argument("--headless") # prevents focus stealing, can work alongside ;-) * but needed for test02 popup solution
 
     chrome_options.add_experimental_option("prefs", {
         "credentials_enable_service": False,
@@ -48,35 +47,73 @@ def create_chrome_options(download_dir):
 def perform_login(bot, username, password):
     logging.info("Performing Login...")
 
-    try:
-        wait = WebDriverWait(bot.browser, 2)
-        user_field = wait.until(
-            EC.presence_of_element_located((By.ID, "asdf")))
-        pass_field = wait.until(
-            EC.presence_of_element_located((By.ID, "fdsa")))
-        login_btn = wait.until(
-            EC.element_to_be_clickable((By.ID, "loginForm:login")))
+    wait = WebDriverWait(bot.browser, 10)
 
+    # Username field is known: id="asdf"
+    try:
+        user_field = wait.until(
+            EC.presence_of_element_located((By.ID, "asdf"))
+        )
         user_field.clear()
         user_field.send_keys(username)
-        pass_field.clear()
-        pass_field.send_keys(password)
-        login_btn.click()
-
-        logging.debug("Clicked on login button")
-    except Exception as e:
-        logging.error(f"login failed{e}")
+        logging.info("Username filled")
+    except Exception:
+        logging.error("Username field 'asdf' not found")
         return False
 
-    try:
+    # Password field possibilities for test02
+    password_ids = [
+        "fdsa",
+        "password",
+        "pwd",
+        "passwort",
+        "j_password",
+        "idToken2",
+        "loginForm:password",
+        "loginForm:pwd"
+    ]
 
-        WebDriverWait(bot.browser, 2).until(
-            lambda d: "startFlow" in d.current_url or "portal" in d.current_url
+    pass_field = None
+    for pid in password_ids:
+        try:
+            pass_field = bot.browser.find_element(By.ID, pid)
+            logging.info(f"Password field found: {pid}")
+            break
+        except Exception:
+            continue
+
+    if pass_field is None:
+
+        try:
+            pass_field = bot.browser.find_element(
+                By.CSS_SELECTOR, "input[type='password']")
+            logging.info("Password field found via CSS selector")
+        except Exception:
+            logging.error("No password field found at all.")
+            return False
+
+    pass_field.clear()
+    pass_field.send_keys(password)
+
+    # Login button
+    try:
+        login_btn = wait.until(
+            EC.element_to_be_clickable((By.ID, "loginForm:login"))
         )
-        logging.info("Login succesfull plus redirect")
+        login_btn.click()
+        logging.info("Login button clicked")
+    except Exception:
+        logging.error("Login button not found")
+        return False
+
+    # Validate login
+    try:
+        wait.until(
+            lambda d: "startFlow" in d.current_url or "portal" in d.current_url)
+        logging.info("Login successful")
         return True
     except Exception:
-        logging.error("Could not Login, maybe there is another (.htaccess-based) popup active?")
+        logging.error("Login failed or wrong credentials")
         return False
 
 
@@ -88,9 +125,12 @@ def open_flow(bot):
     )
     logging.info("Found site")
 
+
 def main():
+
+    # logging extensive but now secure for test02 and digstu
     logging.debug("Obtaining configuration and credentials...")
-    ### OBTAIN CONFIG+CREDENTIALS
+
     parser = argparse.ArgumentParser(
         description="start")
     parser.add_argument(
@@ -128,7 +168,7 @@ def main():
     username = credentials["username"]
     password = credentials["password"]
 
-    ### START BROWSER
+    # START BROWSER
     logging.debug("Opening browser...")
     chrome_options = create_chrome_options(download_dir)
     bot = BrowserAutomation(options=chrome_options)
@@ -141,6 +181,8 @@ def main():
 
     logging.debug("Waiting for popup (0.1 second)...")
     time.sleep(0.1)
+    # test02 bruacht sleep
+    # time.sleep(4)
 
     logging.debug("Open flow...")
     open_flow(bot)
@@ -148,7 +190,8 @@ def main():
     run_filterphase_evaluierung(bot, FLOW_URL, config_module)
 
     logging.info("Done.")
-#    input("ENTER = finish ")# why not just terminate the program at the end? makes profiling easier.
+#    input("ENTER = finish ")# * only nescaerry when i inspected html objects after popup because they differed from non-robotic login
+
 
 if __name__ == "__main__":
     main()

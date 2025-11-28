@@ -5,22 +5,22 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 NOTE_STRICT_RE = re.compile(r"\b([0-6][.,]\d+)\b")
+NOTE_WEAK_RE = re.compile(r"(\d+(?:[.,]\d+)?)")
 
+def _floatcast(s):
+    if not s: return None
+    return float(s.replace(",", "."))
 
 def extract_claimed_from_dom(browser, config):
-    categories = list(getattr(config, "REQUIREMENTS", {}).keys())
-    dom_map = getattr(config, "DOM_ECTS_MAP", {})
-    claimed = extract_claimed(browser, categories, dom_map)
-
+    claimed = _extract_claimed(browser, config)
     bachelor_country_raw = extract_bachelor_country_from_dom(browser)
     claimed["bachelor_country_raw"] = bachelor_country_raw
-
     claimed["bachelor_country"] = bachelor_country_raw
-
     return claimed
 
-
-def extract_claimed(browser, categories, dom_map):
+def _extract_claimed(browser, config):
+    categories = list(getattr(config, "REQUIREMENTS", {}).keys())
+    dom_map = getattr(config, "DOM_ECTS_MAP", {})
     claimed = {"note": None}
     for c in categories:
         claimed[c] = 0.0
@@ -34,10 +34,9 @@ def extract_claimed(browser, categories, dom_map):
         nid = label.get_attribute("for")
         if nid:
             el = browser.find_element(By.XPATH, f"//div[@id='{nid}']//span")
-            txt = el.text.strip()
-            m = NOTE_STRICT_RE.search(txt) or NOTE_STRICT_RE.search(txt)
+            m = NOTE_STRICT_RE.search(el.text.strip())
             if m:
-                claimed["note"] = float(m.group(1).replace(",", "."))
+                claimed["note"] = _floatcast(m.group(1))
     except Exception:
         pass
 
@@ -50,10 +49,9 @@ def extract_claimed(browser, categories, dom_map):
                 el = WebDriverWait(browser, 1).until(
                     EC.presence_of_element_located((By.XPATH, xp))
                 )
-                txt = el.text.strip()
-                m = NOTE_STRICT_RE.search(txt) or NOTE_STRICT_RE.search(txt)
+                m = NOTE_STRICT_RE.search(el.text.strip())
                 if m:
-                    claimed["note"] = float(m.group(1).replace(",", "."))
+                    claimed["note"] = _floatcast(m.group(1))
                     break
             except Exception:
                 pass
@@ -80,12 +78,11 @@ def extract_claimed(browser, categories, dom_map):
 
             if not cat_found:
                 continue
-
+            
             sib = lab.find_element(By.XPATH, "following-sibling::*[1]")
-            txt = sib.text.strip()
-            m = re.search(r"(\d+(?:[.,]\d+)?)", txt)
+            m = NOTE_WEAK_RE.search(sib.text.strip())
             if m:
-                claimed[cat_found] += float(m.group(1).replace(",", "."))
+                claimed[cat_found] += _floatcast(m.group(1))
     except Exception:
         pass
 

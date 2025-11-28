@@ -5,12 +5,14 @@ import platform
 import hashlib
 import logging
 import multiprocessing
-import concurrent.futures
+import asyncio
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 
-# External libs
-from func_timeout import func_timeout, FunctionTimedOut
+# Import your external ECTS engine
+from utils.ocr_engine import extract_ects_ocr
+from utils.claimed_dom_extract import _floatcast
 
 try:
     from pdf2image import convert_from_path
@@ -19,14 +21,11 @@ except ImportError:
     convert_from_path = None
     pytesseract = None
 
-# Import your external ECTS engine
-from utils.ocr_engine import extract_ects_ocr
-
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION & ENVIRONMENT SETUP
 # ==============================================================================
 
-# CRITICAL FIX: Limit Tesseract threads to prevent CPU explosion
+# CRITICAL: Limit Tesseract threads to prevent CPU explosion
 os.environ["OMP_THREAD_LIMIT"] = "2"
 os.environ["OMP_NUM_THREADS"] = "2"
 
@@ -35,8 +34,8 @@ class OCRConfig:
     """Central configuration for OCR."""
     DEFAULT_LANG: str = "deu+eng"
     DEFAULT_PSM: int = 6
-    TIMEOUT_SECONDS: int = 60
-    DPI: int = 200
+    TIMEOUT_SECONDS: int = 100
+    DPI: int = 300
     
     # System Paths (Auto-detected)
     TESSERACT_CMD: Optional[str] = None
@@ -44,7 +43,7 @@ class OCRConfig:
     
     # Threading
     NUM_CPUS: int = max(1, multiprocessing.cpu_count() or 1)
-    MAX_WORKERS: int = max(1, int(NUM_CPUS * 0.8))
+    MAX_WORKERS: int = max(1, int(NUM_CPUS * 0.5))
 
 CONFIG = OCRConfig()
 
@@ -52,8 +51,16 @@ NOTE_STRICT_RE = re.compile(r"\b([0-6][.,]\d{1,2})\b")
 
 _FILE_HASH_CACHE: Dict[str, str] = {}
 # Cache Key: (file_hash, dpi, psm, max_pages)
+
 _OCR_TEXT_CACHE: Dict[tuple, str] = {}
 
+_OCR_POOL = None
+
+def get_ocr_pool():
+    global _OCR_POOL
+    if _OCR_POOL is None:
+        _OCR_POOL = ProcessPoolExecutor(max_workers=CONFIG.MAX_WORKERS)
+    return _OCR_POOL
 
 # ==============================================================================
 # 2. SYSTEM PATH DETECTION
@@ -134,15 +141,12 @@ def _compute_file_hash(pdf_path: str) -> str:
     _FILE_HASH_CACHE[pdf_path] = digest
     return digest
 
-def _ocr_single_image(img, lang=CONFIG.DEFAULT_LANG, psm=CONFIG.DEFAULT_PSM, timeout=CONFIG.TIMEOUT_SECONDS):
+def _ocr_single_image(img, lang=CONFIG.DEFAULT_LANG, psm=CONFIG.DEFAULT_PSM, timeout=CONFIG.TIMEOUT_SECONDS, description="Unknown"):
     try:
         return pytesseract.image_to_string(img, lang=lang, config=f"--psm {psm}", timeout=timeout)
     except RuntimeError as e:
-        if "timeout" in str(e).lower(): logging.warning("OCR Page Timeout")
+        if "timeout" in str(e).lower(): logging.warning(f"OCR Page Timeout at {description}")
         else: logging.error(f"OCR Page Error: {e}")
-        return ""
-    except Exception as e:
-        logging.error(f"General OCR Error: {e}")
         return ""
 
 def ocr_text_from_pdf(pdf_path: str, dpi: int = CONFIG.DPI, max_pages: Optional[int] = None) -> str:
@@ -162,7 +166,7 @@ def ocr_text_from_pdf(pdf_path: str, dpi: int = CONFIG.DPI, max_pages: Optional[
     log_msg = f"Start OCR for {os.path.basename(pdf_path)} (dpi={dpi}"
     if max_pages: log_msg += f", pages={max_pages}"
     log_msg += ")"
-    logging.info(log_msg)
+    logging.debug(log_msg)
 
     # Convert PDF to Images
     try:
@@ -177,11 +181,12 @@ def ocr_text_from_pdf(pdf_path: str, dpi: int = CONFIG.DPI, max_pages: Optional[
         logging.error(f"pdf2image failed for {pdf_path}: {e}")
         return ""
 
-    # Run Parallel OCR
+    # Run OCR
     text_parts = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(images), CONFIG.MAX_WORKERS)) as executor:
-        results = executor.map(_ocr_single_image, images, timeout=CONFIG.TIMEOUT_SECONDS)
-        text_parts = list(results)
+    for img in images:
+        # We call the helper directly. No Executor overhead, as we do parallelism outside.
+        text = _ocr_single_image(img, description=os.path.basename(pdf_path))
+        text_parts.append(text)
 
     full_text = "\n".join(text_parts)
     _OCR_TEXT_CACHE[cache_key] = full_text
@@ -192,46 +197,66 @@ def ocr_text_from_pdf(pdf_path: str, dpi: int = CONFIG.DPI, max_pages: Optional[
 # 4. BUSINESS LOGIC (Evaluation/Extraction)
 # ==============================================================================
 
+_GRADE_KEYWORDS = [
+    "gesamtnote", "abschlussnote", "abschlusspruefung", "abschlussprüfung",
+    "average mark", "overall grade", "overall result", "overall mark",
+    "final grade", "final result", "gesamturteil", "gesamtbewertung",
+    "gesamtprädikat", "gesamtpraedikat", "gesamtleistung"
+]
+_GRADE_CONTEXT_RE = re.compile(
+    "|".join(re.escape(k) for k in _GRADE_KEYWORDS), 
+    re.IGNORECASE
+)
+
 def extract_ocr_note(text: str) -> Optional[float]:
     if not text: return None
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    keywords = {
-        "gesamtnote", "abschlussnote", "abschlusspruefung", "abschlussprüfung",
-        "average mark", "overall grade", "overall result", "overall mark",
-        "final grade", "final result", "gesamturteil", "gesamtbewertung",
-        "gesamtprädikat", "gesamtpraedikat", "gesamtleistung"
-    }
-
-    for ln in lines:
-        if not any(kw in ln.lower() for kw in keywords): continue
+    for ln in (line.strip() for line in text.splitlines()):
+        if not ln:
+            continue
+        if not _GRADE_CONTEXT_RE.search(ln):
+            continue
         m = NOTE_STRICT_RE.search(ln)
         if m:
             try:
-                val = float(m.group(1).replace(",", "."))
+                val = _floatcast(m.group(1))
                 logging.debug(f"OCR-Note found: {val} in line '{ln[:50]}...'")
                 return val
             except ValueError: continue
     return None
 
-def extract_ects_hybrid(pdf_path, module_map, categories) -> Tuple[Dict, List, List, str]:
+async def extract_ects_hybrid_async(pdf_path, module_map, categories) -> Tuple[Dict, List, List, str]:
+    """
+    Async version of extract_ects_hybrid.
+    Runs the heavy blocking OCR function in a separate process.
+    """
     if not os.path.exists(pdf_path):
         logging.error(f"File not found: {pdf_path}")
         return {cat: 0.0 for cat in categories}, [], [], "ocr_hocr"
 
-    logging.info(f"Hybrid OCR Extraction started: {os.path.basename(pdf_path)}")
-    try:
-        # Calls extract_ects_ocr from utils.ocr_engine (Timeout wrapper)
-        sums, matched_modules, unrecognized, method = func_timeout(
-            CONFIG.TIMEOUT_SECONDS, 
-            extract_ects_ocr, 
-            args=(pdf_path, module_map, categories)
-        )
-    except FunctionTimedOut:
-        logging.warning(f"Hybrid OCR Timeout (> {CONFIG.TIMEOUT_SECONDS}s): {os.path.basename(pdf_path)}")
-        return {}, [], [], "FAILED_TIMEOUT"
-    except Exception as e:
-        logging.error(f"Hybrid OCR Error: {e}")
-        return {}, [], [], "FAILED_ERROR"
+    logging.debug(f"Hybrid OCR Extraction (Async) started: {os.path.basename(pdf_path)}")
+    
+    loop = asyncio.get_running_loop()
+    pool = get_ocr_pool()
 
-    logging.info(f"OCR Finished ({method}), Sum: {sum(sums.values())}")
-    return sums, matched_modules, unrecognized, method
+    try:
+        sums, matched_modules, unrecognized, method = await asyncio.wait_for(
+            loop.run_in_executor(
+                pool, 
+                extract_ects_ocr,
+                pdf_path, 
+                module_map, 
+                categories
+            ),
+            timeout=CONFIG.TIMEOUT_SECONDS
+        )
+        
+        logging.debug(f"OCR Finished ({method}), Sum: {sum(sums.values())}")
+        return sums, matched_modules, unrecognized, method
+
+    except asyncio.TimeoutError:
+        logging.warning(f"OCR Timeout (> {CONFIG.TIMEOUT_SECONDS}s): {os.path.basename(os.path.dirname(pdf_path))}/{os.path.basename(pdf_path)}")
+        return {}, [], [], "FAILED_TIMEOUT"
+        
+    except Exception as e:
+        logging.error(f"Hybrid OCR Async Error: {e}")
+        return {}, [], [], "FAILED_ERROR"

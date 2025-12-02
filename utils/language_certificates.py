@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional
 
 from .ocr_ects import ocr_text_from_pdf
 from .grading_systems import normalize_country_name
-
+from utils.claimed_dom_extract import _floatcast
 
 def _merge_texts(pdf_paths: List[str]) -> str:
     parts = []
@@ -17,6 +17,21 @@ def _merge_texts(pdf_paths: List[str]) -> str:
                 f"language certicate couldnt be read{p}: {e}")
     return "\n".join(parts)
 
+
+GERMAN_C1_C2_RE = re.compile(
+    r"""
+    dsh[-\s]?[23]|                          # Matches DSH-2 or DSH-3
+    testdaf|
+    goethe[-\s]?zertifikat\s*c2|
+    (?:kleine|große)[s]?\s+deutsche[s]?\s+sprachdiplom|  # Combined Small/Big
+    zentrale\s+oberstufenpr[üu]fung|        # [üu] is faster than (ü|u)
+    deutsches\s+sprachdiplom|
+    telc\s+deutsch\s+c1\s+hochschule|
+    \b(?:ö|oe)sd\s*c2|                      # (?:...) is non-capturing (faster)
+    (?:österreichisches|oesterreichisches)\s+sprachdiplom
+    """,
+    re.IGNORECASE | re.VERBOSE
+)
 
 def evaluate_language_status_bwl(
     lang_pdfs: List[str],
@@ -30,27 +45,15 @@ def evaluate_language_status_bwl(
     if not lang_pdfs:
         return "required but not available"
 
-    text = _merge_texts(lang_pdfs).lower()
+    text = _merge_texts(lang_pdfs)
 
-    patterns = [
-        r"dsh[-\s]?2",
-        r"dsh[-\s]?3",
-        r"testdaf",
-        r"goethe[-\s]?zertifikat\s*c2",
-        r"kleine[s]?\s+deutsche[s]?\s+sprachdiplom",
-        r"große[s]?\s+deutsche[s]?\s+sprachdiplom",
-        r"zentrale\s+oberstufenpr(ü|u)fung",
-        r"deutsches\s+sprachdiplom",
-        r"telc\s+deutsch\s+c1\s+hochschule",
-        r"\b(ö|oe)sd\s*c2",
-        r"(österreichisches|oesterreichisches)\s+sprachdiplom",
-    ]
-
-    if any(re.search(p, text) for p in patterns):
+    if GERMAN_C1_C2_RE.search(text):
         return "available (German C1/C2 or equivalent)"
     else:
         return "available (unclassified German certificate)"
 
+TOEFL_PATTERN = re.compile(r"\b\d{2,3}\b")
+IELTS_PATTERN = re.compile(r"\b\d(?:[.,]\d)?\b")
 
 def evaluate_language_status_ai(
     lang_pdfs: List[str],
@@ -65,9 +68,8 @@ def evaluate_language_status_ai(
 
     # TOEFL
     if "toefl" in text:
-
-        nums = [float(x.replace(",", "."))
-                for x in re.findall(r"\b\d{2,3}\b", text)]
+        nums = [_floatcast(x)
+                for x in TOEFL_PATTERN.findall(text)]
         if any(n >= 500 for n in nums) or any(n >= 200 for n in nums) or any(n >= 80 for n in nums):
             return "available (likely sufficient TOEFL)"
         else:
@@ -75,8 +77,8 @@ def evaluate_language_status_ai(
 
     # IELTS
     if "ielts" in text:
-        nums = [float(x.replace(",", "."))
-                for x in re.findall(r"\b\d(?:[.,]\d)?\b", text)]
+        nums = [_floatcast(x)
+                for x in IELTS_PATTERN.findall(text)]
         if any(n >= 6.0 for n in nums):
             return "available (likely sufficient IELTS)"
         else:

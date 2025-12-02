@@ -4,6 +4,8 @@ import time
 import csv
 import tqdm
 import logging
+import asyncio
+from functools import partial
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -17,7 +19,7 @@ from utils.language_certificates import (
 )
 from utils.ocr_ects import (
     ensure_ocr_available,
-    extract_ects_hybrid,
+    extract_ects_hybrid_async,
     extract_ocr_note,
     ocr_text_from_pdf,
 )
@@ -83,9 +85,11 @@ def load_whitelist(csv_path):
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         next(reader, None)
-        for row in reader:
-            if row and row[0].strip():
-                whitelist.add(row[0].strip().lower())
+        whitelist = {stripped.lower()
+                     for stripped in (row[0].strip()
+                                      for row in reader
+                                      if row)
+                     if stripped}
     logging.info(f"Whitelist geladen: {len(whitelist)} Einträge.")
     return whitelist
 
@@ -108,7 +112,7 @@ def load_module_mapping(csv_path):
     )
 
 
-def is_candidate_row(row):
+def is_candidate_row(row): # XXX deprecated, not necessary, bad code anyways.
     try:
         cells = row.find_elements(By.TAG_NAME, "td")
         if not cells or len(cells) < 3:
@@ -183,6 +187,9 @@ def evaluate_requirements_ects(ects_data, matched_modules, unrecognized, config)
     return status, details
 
 def run_filterphase_evaluierung(bot, flow_url, config):
+    asyncio.run(_run_filterphase_evaluierung_async(bot, flow_url, config))
+
+async def _run_filterphase_evaluierung_async(bot, flow_url, config):
     logging.info("Starte Evaluierung...")
     eval_start = time.time()
 
@@ -208,16 +215,17 @@ def run_filterphase_evaluierung(bot, flow_url, config):
     if not _trigger_search_and_wait(bot):
         return
 
-    # 4. OPTIMIZED: Identify Candidate Indices ONCE
+    # 4. Identify Candidate Indices
     try:
         rows_initial = bot.browser.find_elements(*ROW_LOCATOR)
-        # Store only the integer index of rows that match criteria
+        logging.debug("Identifying candidates...")
         candidate_indices = [
-            idx for idx, r in enumerate(rows_initial) 
-            if idx > 0 and is_candidate_row(r)
+            idx for idx, r in enumerate(rows_initial)
+            if idx > 0 # and is_candidate_row(r) # XXX It seems is_candidate_row is always True for our input, the ROW_LOCATOR works.
         ]
         total = len(candidate_indices)
-        logging.debug(f"TRACE: {total} Zeilen erkannt (Indices: {candidate_indices})")
+        logging.info(f"{total} Zeilen erkannt")
+        logging.debug(f"Indices: {candidate_indices})")
     except Exception as count_e:
         logging.error(f"Konnte Zeilen nicht finden {count_e}")
         return
@@ -232,21 +240,49 @@ def run_filterphase_evaluierung(bot, flow_url, config):
     program = "ai" if "mathemodule" in paths["module_map_csv"].lower() else "bwl"
 
     # 5. Main Processing Loop (Iterate over Indices)
-    for loop_index, target_row_index in enumerate(tqdm.tqdm(candidate_indices, desc="Processing", unit="app")):
-        app_start = time.time()
+    pending_tasks = set()
+    # XXX  again this OCR/multiprocessing config should be centralized :-/
+    MAX_CONCURRENT_OCR = 3  # Prevent overloading the CPU if browser is too fast
+
+    progressbar = tqdm.tqdm(candidate_indices, desc="Processing", unit="app")
+    
+    for loop_index, target_row_index in enumerate(progressbar):
         
-        # Pass both the loop_index (for counting 1/100) and target_row_index (for locating the row)
-        result_data = _process_single_applicant(
-            bot, loop_index, target_row_index, main_window_handle, paths, 
-            module_map, whitelist_set, categories, program, config
+        # A. Clean up finished tasks
+        if pending_tasks:
+            done, pending_tasks = await asyncio.wait(pending_tasks, timeout=0.01, return_when=asyncio.FIRST_COMPLETED)
+        
+        # Flow Control: If we have too many OCRs running, wait for one to finish
+        if len(pending_tasks) >= MAX_CONCURRENT_OCR:
+            done, pending_tasks = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        # B. Step 1: Sync Browser Work (Download & Extract)
+        res, pdfs = _step1_scrape_sync(
+            bot, loop_index, target_row_index, main_window_handle, paths, categories, config
         )
 
-        if not result_data:
-            continue 
+        if not res: continue # Skip if navigation failed
 
-        # Calculate Duration & Write CSV
-        result_data["duration"] = round(time.time() - app_start, 3)
-        _write_result_to_csv(paths["output_csv"], result_data, categories)
+        current_app = res.get("applicant_num", "Unknown")
+        progressbar.set_postfix(app=f"{current_app}")
+
+        # C. Step 2: Schedule Async Analysis
+        # This returns immediately, allowing the loop to continue to the next applicant!
+        task = asyncio.create_task(
+            _step2_analyze_async(
+                pdfs, program, _check_non_eu_status(bot), 
+                module_map, whitelist_set, categories, res, config, paths
+            )
+        )
+        pending_tasks.add(task)
+        
+        # Cleanup browser tab for the next iteration (must be done on main thread)
+        _close_tab_and_return(bot, main_window_handle)
+
+    # 6. Wait for remaining tasks after loop finishes
+    if pending_tasks:
+        logging.info(f"Waiting for {len(pending_tasks)} remaining background tasks...")
+        await asyncio.wait(pending_tasks)
 
     total_time = time.time() - eval_start
     logging.debug(f"Total evaluation time: {total_time:.2f} seconds")
@@ -257,8 +293,9 @@ def run_filterphase_evaluierung(bot, flow_url, config):
 #                               HELPER FUNCTIONS
 # ==============================================================================
 
-def _process_single_applicant(bot, loop_index, target_row_index, main_window_handle, paths, module_map, whitelist_set, categories, program, config):
+def _step1_scrape_sync(bot, loop_index, target_row_index, main_window_handle, paths, categories, config):
     """
+    Performs all Browser interactions. Returns (result_dict, pdf_paths).
     Processes the applicant at the specific physical DOM index `target_row_index`.
     """
     
@@ -282,57 +319,116 @@ def _process_single_applicant(bot, loop_index, target_row_index, main_window_han
         "uni_name": "",
         "is_whitelisted": False,
         "note_ok": False,
-        "status_final": "Not fulfilled"
+        "status_final": "Not fulfilled",
+        "duration": 0
     }
 
-    try:
-        # 1. Navigation: Open Tab using the Index
-        if not _navigate_to_applicant_detail_by_index(bot, target_row_index, main_window_handle, res):
-            return None 
+    # 1. Navigation
+    if not _navigate_to_applicant_detail_by_index(bot, target_row_index, main_window_handle, res):
+        return None, []
 
-        # 2. Extract Metadata
-        res["applicant_num"] = get_applicant_number_from_detail_page(bot.browser)
-        _handle_application_buttons(bot)
-        
-        res["claimed"] = extract_claimed_from_dom(bot.browser, config)
-        res["uni_name"] = get_university_from_dom(bot.browser)
-        res["bachelor_country"] = res["claimed"].get("bachelor_country", "")
-        
-        is_non_eu = _check_non_eu_status(bot)
-        
-        # 3. Document Download
-        pdfs = download_pdfs_for_applicant(
-            browser=bot.browser,
-            download_dir=paths["download_dir"],
-            extract_dir=paths["extract_dir"],
-            applicant_num=res["applicant_num"],
+    # 2. Extract Metadata
+    res["applicant_num"] = get_applicant_number_from_detail_page(bot.browser)
+    _handle_application_buttons(bot)
+    res["claimed"] = extract_claimed_from_dom(bot.browser, config)
+    res["uni_name"] = get_university_from_dom(bot.browser)
+    res["bachelor_country"] = res["claimed"].get("bachelor_country", "")
+
+    # 3. Document Download
+    pdfs = download_pdfs_for_applicant(
+        browser=bot.browser,
+        download_dir=paths["download_dir"],
+        extract_dir=paths["extract_dir"],
+        applicant_num=res["applicant_num"],
+    )
+    
+    return res, pdfs
+
+async def _step2_analyze_async(pdfs, program, is_non_eu, module_map, whitelist_set, categories, res, config, paths):
+    """
+    Background Task: Performs heavy OCR and Logic without blocking the browser.
+    """
+    loop = asyncio.get_running_loop()
+
+    try:
+        # A. Analyze Grades (Sync function wrapped in Executor to prevent blocking)
+        # We use 'None' as the executor to use the default ThreadPoolExecutor
+        await loop.run_in_executor(
+            None, 
+            partial(_analyze_grade_logic, pdfs, is_non_eu, res, config)
         )
 
-        # 4. Analyze Grades
-        _analyze_grade_logic(pdfs, is_non_eu, res, config)
+        # B. Analyze ECTS
+        # We inline the logic from _analyze_documents_and_ects here to make it async
+        non_vpd_pdfs = [p for p in pdfs if "vpd" not in os.path.basename(p).lower()]
+        best_transcript_path = None
+        lang_pdfs = []
 
-        # 5. Analyze ECTS / Documents
-        _analyze_documents_and_ects(pdfs, program, is_non_eu, module_map, whitelist_set, categories, res, config)
-        
-        # 6. Final Decision
-        if res.get("status_final") == "Fulfilled":
+        if non_vpd_pdfs:
+            # classify_many is fast/light, can run sync or wrapped
+            class_result = classify_many(non_vpd_pdfs, program)
+            best_transcript_path, _ = class_result["best_transcript"]
+            
+            res["has_bachelor"] = bool(class_result["by_type"].get("degree_certificate"))
+            res["has_transcript"] = bool(class_result["by_type"].get("transcript") or best_transcript_path)
+            lang_pdfs = class_result["by_type"].get("language_certificate", [])
+            
+            for dtype, p_list in class_result["by_type"].items():
+                if dtype not in ("transcript", "degree_certificate", "language_certificate", "vpd"):
+                    res["other_docs"].extend([os.path.basename(p) for p in p_list])
+
+        # Language Status logic (Fast)
+        if program == "bwl":
+            lang_status = evaluate_language_status_bwl(lang_pdfs, res.get("bachelor_country_raw", ""))
+        else:
+            lang_status = evaluate_language_status_ai(lang_pdfs)
+        res["details_list"].append(f"Language status: {lang_status}")
+
+        # University Whitelist Check
+        is_whitelisted, uni_match = check_university_whitelist(res["uni_name"], whitelist_set)
+        res["is_whitelisted"] = is_whitelisted
+        status_ects = "Not fulfilled"
+
+        if is_whitelisted:
+            logging.info(f"Whitelisted match: {uni_match}")
+            res["extraction_method"] = "Whitelist"
+            status_ects, _ = evaluate_requirements_ects(res["claimed"], [], [], config)
+            res["details_list"].append(f"ECTS (claimed) status: {status_ects}")
+        else:
+            if not non_vpd_pdfs:
+                res["details_list"].append("Only VPD found, no transcript.")
+            else:
+                main_pdf = best_transcript_path if best_transcript_path else max(non_vpd_pdfs, key=os.path.getsize)
+                
+                sums, matched, unrec, method = await extract_ects_hybrid_async(main_pdf, module_map, categories)
+                
+                res["saved_pdf_counts"] = sums
+                res["matched_modules"] = matched
+                res["unrecognized_lines"] = unrec
+                res["extraction_method"] = method
+                
+                status_ects, _ = evaluate_requirements_ects(sums, matched, unrec, config)
+                res["details_list"].append(f"ECTS (OCR) status: {status_ects}")
+
+        # Final Decision Logic
+        if status_ects == "Fulfilled" and res["note_ok"]:
+            res["status_final"] = "Fulfilled"
             res["decision"] = "Yes"
+        else:
+            res["status_final"] = "Not fulfilled"
+
+        # C. Write Result to CSV immediately upon completion
+        # We calculate duration relative to when the analysis *finished*
+        _write_result_to_csv(paths["output_csv"], res, categories)
+        logging.debug(f"Finished Analysis for {res['applicant_num']}")
         
-        # Cleanup
-        _close_tab_and_return(bot, main_window_handle)
-        return res
-
     except Exception as e:
-        logging.error(f"{res['applicant_num']}: {e}")
-        res["details_list"].append(f"Evaluation error: {e}")
-        _close_tab_and_return(bot, main_window_handle)
-        return res
-
+        logging.error(f"Async Analysis Error {res['applicant_num']}: {e}")
+        
 
 def _navigate_to_applicant_detail_by_index(bot, target_index, main_window_handle, res):
     """
     Refetches the table (to avoid StaleElement) and clicks the row at `target_index`.
-    Does NOT run is_candidate_row() again.
     """
     try:
         if bot.browser.current_window_handle != main_window_handle:
@@ -402,6 +498,7 @@ def _navigate_to_applicant_detail_by_index(bot, target_index, main_window_handle
 def _analyze_grade_logic(pdfs, is_non_eu, res, config):
     ocr_note = None
     has_vpd = False
+
     
     vpd_pdfs = [pdf_path for pdf_path in pdfs if "vpd" in os.path.basename(pdf_path).lower()]
     
@@ -413,11 +510,11 @@ def _analyze_grade_logic(pdfs, is_non_eu, res, config):
 
     if vpd_pdfs:
         has_vpd = True
-        logging.info("VPD found")
+        logging.debug("VPD found")
         text_vpd = ocr_text_from_pdf(vpd_pdfs[0])
         ocr_note = extract_ocr_note(text_vpd) if text_vpd else None
     elif not is_non_eu:
-        combined_text = "\n".join([(ocr_text_from_pdf(pdf_path) or "") for pdf_path in grade_pdfs])
+        combined_text = "\n".join((ocr_text_from_pdf(pdf_path) or "") for pdf_path in grade_pdfs)
         ocr_note = extract_ocr_note(combined_text) if combined_text.strip() else None
         
         if ocr_note is None and pdfs:
@@ -455,68 +552,6 @@ def _analyze_grade_logic(pdfs, is_non_eu, res, config):
     elif note_used > req_max:
         res["details_list"].append(f"Grade too low ({note_used} > {req_max}).")
         res["note_ok"] = False
-
-
-def _analyze_documents_and_ects(pdfs, program, is_non_eu, module_map, whitelist_set, categories, res, config):
-    non_vpd_pdfs = [pdf_path for pdf_path in pdfs if "vpd" not in os.path.basename(pdf_path).lower()]
-    best_transcript_path = None
-    lang_pdfs = []
-    
-    if non_vpd_pdfs:
-        class_result = classify_many(non_vpd_pdfs, program)
-        best_transcript_path, _ = class_result["best_transcript"]
-        
-        res["has_bachelor"] = bool(class_result["by_type"].get("degree_certificate"))
-        res["has_transcript"] = bool(class_result["by_type"].get("transcript") or best_transcript_path)
-        lang_pdfs = class_result["by_type"].get("language_certificate", [])
-        
-        for dtype, paths_list in class_result["by_type"].items():
-            if dtype not in ("transcript", "degree_certificate", "language_certificate", "vpd"):
-                res["other_docs"].extend([os.path.basename(pdf_path) for pdf_path in paths_list])
-
-    if program == "bwl":
-        lang_status = evaluate_language_status_bwl(lang_pdfs, res.get("bachelor_country_raw", ""))
-    else:
-        lang_status = evaluate_language_status_ai(lang_pdfs)
-    res["details_list"].append(f"Language status: {lang_status}")
-
-    is_whitelisted, uni_match = check_university_whitelist(res["uni_name"], whitelist_set)
-    res["is_whitelisted"] = is_whitelisted
-    status_ects = "Not fulfilled"
-
-    if is_whitelisted:
-        logging.info(f"Whitelisted match: {uni_match}")
-        res["extraction_method"] = "Whitelist"
-        status_ects, _ = evaluate_requirements_ects(res["claimed"], [], [], config)
-        res["details_list"].append(f"University whitelist: {uni_match}")
-        res["details_list"].append(f"ECTS (claimed) status: {status_ects}")
-    else:
-        if not pdfs:
-            res["details_list"].append("No PDFs for ECTS evaluation.")
-        elif not non_vpd_pdfs:
-            res["details_list"].append("Only VPD found, no transcript.")
-        else:
-            main_pdf = best_transcript_path if best_transcript_path else max(non_vpd_pdfs, key=os.path.getsize)
-            if not best_transcript_path:
-                res["details_list"].append("No clear transcript detected, using largest PDF.")
-
-            sums, matched, unrec, method = extract_ects_hybrid(main_pdf, module_map, categories)
-            
-            res["saved_pdf_counts"] = sums
-            res["matched_modules"] = matched
-            res["unrecognized_lines"] = unrec
-            res["extraction_method"] = method
-            
-            status_ects, _ = evaluate_requirements_ects(sums, matched, unrec, config)
-            res["details_list"].append(f"ECTS (OCR) status: {status_ects}")
-
-    if status_ects == "Fulfilled" and res["note_ok"]:
-        res["status_final"] = "Fulfilled"
-    else:
-        res["status_final"] = "Not fulfilled"
-
-    if is_non_eu and not res["has_vpd"]:
-        res["details_list"].append("Documents insufficient: VPD missing for Non-EU applicant.")
 
         
 def _apply_search_filters(bot):
@@ -585,10 +620,10 @@ def _write_result_to_csv(path, res, categories):
 def _check_non_eu_status(bot):
     try:
         bot.browser.find_element(By.XPATH, "//h2[contains(., 'Masterzugangsberechtigung (A)')]")
-        logging.info("Non-EU (A).")
+        logging.debug("Non-EU (A).")
         return True
     except NoSuchElementException:
-        logging.info("EU (D).")
+        logging.debug("EU (D).")
         return False
 
 def _close_tab_and_return(bot, main_handle):

@@ -20,8 +20,8 @@ logging.basicConfig(
 
 
 # test02 urls
-LOGIN_URL = "https://test02.digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
-FLOW_URL = "https://test02.digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
+LOGIN_URL = "https://digstu.hhu.de/qisserver/pages/cs/sys/portal/hisinoneStartPage.faces"
+FLOW_URL = "https://digstu.hhu.de/qisserver/pages/startFlow.xhtml?_flowId=searchApplicants-flow&navigationPosition=hisinoneapp,applicationEditorGeneratedJSFDtos&recordRequest=true"
 
 
 def create_chrome_options(download_dir):

@@ -23,5 +23,3 @@ REQUIREMENTS = {
     "Mathematik": 30.0
 }
 WHITELIST_UNIS = os.path.join(RES_DIR, "whitelist_unis_ai.csv")
-
-
